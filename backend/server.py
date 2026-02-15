@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import json
+import os
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -104,17 +105,11 @@ def home():
     }), 200
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("🚀 Groq Autonomous Agent Backend Server")
-    print("=" * 60)
-    print("✓ Server running at: http://localhost:5000")
-    print("✓ Health check: http://localhost:5000/api/health")
-    print("✓ CORS enabled for all origins")
-    print("=" * 60)
-    print("\n👉 Sekarang jalankan frontend dan gunakan API key Groq Anda!\n")
+    port = int(os.environ.get('PORT', 5000))  # ← Pakai PORT dari Railway
     
-    app.run(
-        host='0.0.0.0',
-        port=5000,
-        debug=True
-    )
+    print("=" * 60)
+    print("🚀 Groq Autonomous Agent Backend")
+    print(f"✓ Server running on port: {port}")
+    print("=" * 60)
+    
+    app.run(host='0.0.0.0', port=port, debug=False)
