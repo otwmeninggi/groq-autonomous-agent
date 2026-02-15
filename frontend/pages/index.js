@@ -28,6 +28,18 @@ export default function Home() {
       setIsApiKeySet(true);
       addLog('✓ API Key loaded from storage', 'success');
     }
+    
+    // Check backend connection
+    addLog('🔍 Backend URL: ' + backendUrl, 'info');
+    fetch(`${backendUrl}/api/health`)
+      .then(res => res.json())
+      .then(data => {
+        addLog('✅ Backend connected: ' + data.message, 'success');
+      })
+      .catch(err => {
+        addLog('⚠️ Backend tidak terdeteksi. Pastikan backend sudah deploy!', 'warning');
+        addLog('Error: ' + err.message, 'error');
+      });
   }, []);
 
   useEffect(() => {
@@ -47,11 +59,53 @@ export default function Home() {
     }]);
   };
 
-  const handleApiKeySubmit = () => {
-    if (apiKey.trim()) {
+  const handleApiKeySubmit = async () => {
+    if (!apiKey.trim()) {
+      alert('Masukkan API key terlebih dahulu!');
+      return;
+    }
+    
+    if (!apiKey.startsWith('gsk_')) {
+      alert('API key harus diawali dengan "gsk_"');
+      return;
+    }
+
+    // Validasi API key dengan test request
+    addLog('🔍 Memvalidasi API key...', 'info');
+    
+    try {
+      const testResponse = await fetch(`${backendUrl}/api/groq/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey,
+        },
+        body: JSON.stringify({
+          model: 'llama-3.3-70b-versatile',
+          messages: [
+            { role: 'system', content: 'You are a helpful assistant.' },
+            { role: 'user', content: 'Hi' }
+          ],
+          temperature: 0.7,
+          max_tokens: 10
+        })
+      });
+
+      if (!testResponse.ok) {
+        const errorData = await testResponse.json();
+        alert('❌ API Key TIDAK VALID!\n\n' + (errorData.error || 'Silakan cek API key Anda di console.groq.com'));
+        addLog('❌ API key validation failed', 'error');
+        return;
+      }
+
+      // API key valid
       setIsApiKeySet(true);
       localStorage.setItem('groq_api_key', apiKey);
-      addLog('✓ API Key Groq berhasil diset', 'success');
+      addLog('✅ API Key VALID & tersimpan!', 'success');
+      
+    } catch (error) {
+      alert('❌ Tidak bisa connect ke backend!\n\nPastikan:\n1. Backend sudah running di Railway\n2. URL backend benar di environment variable\n3. CORS sudah enable di backend\n\nError: ' + error.message);
+      addLog('❌ Connection error: ' + error.message, 'error');
     }
   };
 
