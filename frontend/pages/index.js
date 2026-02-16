@@ -10,36 +10,17 @@ export default function Home() {
   const [isRunning, setIsRunning] = useState(false);
   const [logs, setLogs] = useState([]);
   const [agentThoughts, setAgentThoughts] = useState([]);
-  const [showSettings, setShowSettings] = useState(false);
-  const [chainConfig, setChainConfig] = useState({
-    type: 'none',
-    rpcUrl: '',
-    walletAddress: ''
-  });
 
   const logsEndRef = useRef(null);
   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
 
   useEffect(() => {
-    // Load API key from localStorage
     const savedKey = localStorage.getItem('groq_api_key');
     if (savedKey) {
       setApiKey(savedKey);
       setIsApiKeySet(true);
       addLog('✓ API Key loaded from storage', 'success');
     }
-    
-    // Check backend connection
-    addLog('🔍 Backend URL: ' + backendUrl, 'info');
-    fetch(`${backendUrl}/api/health`)
-      .then(res => res.json())
-      .then(data => {
-        addLog('✅ Backend connected: ' + data.message, 'success');
-      })
-      .catch(err => {
-        addLog('⚠️ Backend tidak terdeteksi. Pastikan backend sudah deploy!', 'warning');
-        addLog('Error: ' + err.message, 'error');
-      });
   }, []);
 
   useEffect(() => {
@@ -59,7 +40,7 @@ export default function Home() {
     }]);
   };
 
-  const handleApiKeySubmit = async () => {
+  const handleApiKeySubmit = () => {
     if (!apiKey.trim()) {
       alert('Masukkan API key terlebih dahulu!');
       return;
@@ -70,43 +51,10 @@ export default function Home() {
       return;
     }
 
-    // Validasi API key dengan test request
-    addLog('🔍 Memvalidasi API key...', 'info');
-    
-    try {
-      const testResponse = await fetch(`${backendUrl}/api/groq/chat`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': apiKey,
-        },
-        body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
-          messages: [
-            { role: 'system', content: 'You are a helpful assistant.' },
-            { role: 'user', content: 'Hi' }
-          ],
-          temperature: 0.7,
-          max_tokens: 10
-        })
-      });
-
-      if (!testResponse.ok) {
-        const errorData = await testResponse.json();
-        alert('❌ API Key TIDAK VALID!\n\n' + (errorData.error || 'Silakan cek API key Anda di console.groq.com'));
-        addLog('❌ API key validation failed', 'error');
-        return;
-      }
-
-      // API key valid
-      setIsApiKeySet(true);
-      localStorage.setItem('groq_api_key', apiKey);
-      addLog('✅ API Key VALID & tersimpan!', 'success');
-      
-    } catch (error) {
-      alert('❌ Tidak bisa connect ke backend!\n\nPastikan:\n1. Backend sudah running di Railway\n2. URL backend benar di environment variable\n3. CORS sudah enable di backend\n\nError: ' + error.message);
-      addLog('❌ Connection error: ' + error.message, 'error');
-    }
+    // Langsung simpan tanpa validasi (avoid 429 rate limit)
+    setIsApiKeySet(true);
+    localStorage.setItem('groq_api_key', apiKey);
+    addLog('✓ API Key tersimpan! Siap digunakan.', 'success');
   };
 
   const handleFileUpload = (e) => {
@@ -150,6 +98,18 @@ export default function Home() {
   };
 
   const executeAgentTask = async () => {
+    if (isRunning) return;
+    
+    if (!useSkillMode && !instruction.trim()) {
+      alert('Masukkan instruksi untuk agent!');
+      return;
+    }
+
+    if (useSkillMode && !skillFile) {
+      alert('Upload file SKILL.md terlebih dahulu!');
+      return;
+    }
+
     setIsRunning(true);
     addLog('🚀 Agent mulai bekerja...', 'info');
     
@@ -158,15 +118,11 @@ export default function Home() {
       let userPrompt = '';
 
       if (useSkillMode && skillFile) {
-        systemPrompt = `Anda adalah autonomous agent yang mengikuti instruksi dari SKILL.md. 
-Baca dan pahami instruksi dengan seksama, lalu eksekusi step by step.
-Jelaskan reasoning Anda di setiap langkah.`;
+        systemPrompt = 'Anda adalah autonomous agent yang mengikuti instruksi dari SKILL.md. Baca dan pahami instruksi dengan seksama, lalu eksekusi step by step. Jelaskan reasoning Anda di setiap langkah.';
         userPrompt = `SKILL.md Content:\n\n${skillFile.content}\n\nUser Instruction: ${instruction || 'Ikuti semua langkah dalam SKILL.md'}`;
         addLog('📋 Mode: Menggunakan SKILL.md', 'info');
       } else {
-        systemPrompt = `Anda adalah autonomous agent yang pintar dan mampu reasoning secara mandiri.
-Analisis task yang diberikan, buat plan, dan jelaskan langkah-langkah yang akan Anda ambil.
-Anda bisa melakukan berbagai task seperti analisis data, web scraping, inscription/minting (jika chain sudah dikonfigurasi), dan tugas otomatis lainnya.`;
+        systemPrompt = 'Anda adalah autonomous agent yang pintar dan mampu reasoning secara mandiri. Analisis task yang diberikan, buat plan, dan jelaskan langkah-langkah yang akan Anda ambil.';
         userPrompt = instruction;
         addLog('🤖 Mode: Autonomous (tanpa SKILL.md)', 'info');
       }
@@ -184,10 +140,6 @@ Anda bisa melakukan berbagai task seperti analisis data, web scraping, inscripti
                   type: 'array',
                   items: { type: 'string' },
                   description: 'List langkah-langkah yang perlu dilakukan'
-                },
-                estimated_duration: {
-                  type: 'string',
-                  description: 'Estimasi waktu completion'
                 }
               },
               required: ['task_breakdown']
@@ -234,7 +186,7 @@ Anda bisa melakukan berbagai task seperti analisis data, web scraping, inscripti
           const functionArgs = JSON.parse(toolCall.function.arguments);
 
           addLog(`🔧 Agent memanggil tool: ${functionName}`, 'info');
-          addThought(`Menggunakan tool: ${functionName}`, functionArgs);
+          addThought(`Menggunakan tool: ${functionName}`, JSON.stringify(functionArgs, null, 2));
 
           let toolResult = {};
 
@@ -277,7 +229,7 @@ Anda bisa melakukan berbagai task seperti analisis data, web scraping, inscripti
       addLog(`❌ Error: ${error.message}`, 'error');
       addThought('Error occurred during execution', error.message);
     } finally {
-      setIsRunning(false);
+      setIsRunning = false;
     }
   };
 
@@ -327,7 +279,7 @@ Anda bisa melakukan berbagai task seperti analisis data, web scraping, inscripti
               disabled={!apiKey.trim()}
               className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white py-3 rounded-lg font-semibold hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50"
             >
-              Mulai Agent
+              Simpan & Mulai
             </button>
 
             <p className="text-xs text-purple-300 text-center mt-4">
@@ -356,65 +308,14 @@ Anda bisa melakukan berbagai task seperti analisis data, web scraping, inscripti
                   <p className="text-purple-200 text-sm">Powered by Llama 3.3 70B</p>
                 </div>
               </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setShowSettings(!showSettings)}
-                  className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-all"
-                >
-                  ⚙️ Settings
-                </button>
-                <button
-                  onClick={resetApiKey}
-                  className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-lg transition-all"
-                >
-                  Reset API Key
-                </button>
-              </div>
+              <button
+                onClick={resetApiKey}
+                className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-lg transition-all"
+              >
+                Reset API Key
+              </button>
             </div>
           </div>
-
-          {/* Settings Panel */}
-          {showSettings && (
-            <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-6 border border-white/20">
-              <h3 className="text-xl font-bold text-white mb-4">Chain Configuration</h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-purple-200 text-sm mb-2">Chain Type</label>
-                  <select
-                    value={chainConfig.type}
-                    onChange={(e) => setChainConfig({...chainConfig, type: e.target.value})}
-                    className="w-full px-4 py-2 bg-white/10 border border-white/30 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  >
-                    <option value="none">Belum dikonfigurasi</option>
-                    <option value="bitcoin">Bitcoin (Ordinals)</option>
-                    <option value="ethereum">Ethereum</option>
-                    <option value="solana">Solana</option>
-                    <option value="polygon">Polygon</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-purple-200 text-sm mb-2">RPC URL</label>
-                  <input
-                    type="text"
-                    value={chainConfig.rpcUrl}
-                    onChange={(e) => setChainConfig({...chainConfig, rpcUrl: e.target.value})}
-                    placeholder="https://..."
-                    className="w-full px-4 py-2 bg-white/10 border border-white/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-purple-200 text-sm mb-2">Wallet Address</label>
-                  <input
-                    type="text"
-                    value={chainConfig.walletAddress}
-                    onChange={(e) => setChainConfig({...chainConfig, walletAddress: e.target.value})}
-                    placeholder="0x..."
-                    className="w-full px-4 py-2 bg-white/10 border border-white/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  />
-                </div>
-              </div>
-            </div>
-          )}
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* Control Panel */}
@@ -471,8 +372,8 @@ Anda bisa melakukan berbagai task seperti analisis data, web scraping, inscripti
                   value={instruction}
                   onChange={(e) => setInstruction(e.target.value)}
                   placeholder={useSkillMode 
-                    ? "Tambahkan instruksi khusus jika diperlukan..."
-                    : "Contoh: Analisis trend crypto terbaru dan buat summary..."
+                    ? "Tambahkan instruksi khusus..."
+                    : "Contoh: Analisis trend crypto terbaru..."
                   }
                   className="w-full px-4 py-3 bg-white/10 border border-white/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 h-32 resize-none"
                 />
@@ -502,7 +403,7 @@ Anda bisa melakukan berbagai task seperti analisis data, web scraping, inscripti
               </div>
             </div>
 
-            {/* Logs Panel */}
+            {/* Logs */}
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
               <h2 className="text-xl font-bold text-white mb-4">Activity Logs</h2>
               <div className="bg-black/30 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm">
@@ -527,7 +428,7 @@ Anda bisa melakukan berbagai task seperti analisis data, web scraping, inscripti
 
           {/* Agent Thoughts */}
           <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mt-6 border border-white/20">
-            <h2 className="text-xl font-bold text-white mb-4">🧠 Agent Reasoning & Thoughts</h2>
+            <h2 className="text-xl font-bold text-white mb-4">🧠 Agent Reasoning</h2>
             <div className="bg-black/30 rounded-lg p-4 max-h-96 overflow-y-auto">
               {agentThoughts.length === 0 ? (
                 <p className="text-gray-400 text-center">Agent belum mulai berpikir...</p>
