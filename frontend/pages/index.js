@@ -14,9 +14,8 @@ export default function Home() {
   const logsEndRef = useRef(null);
   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
 
-  // ✅ PERBAIKAN 1: Tambahkan retry state
-  const [retryCount, setRetryCount] = useState(0);
-  const MAX_RETRIES = 3;
+  // State untuk menyimpan file system virtual
+  const [virtualFileSystem, setVirtualFileSystem] = useState({});
 
   useEffect(() => {
     const savedKey = localStorage.getItem('groq_api_key');
@@ -69,20 +68,122 @@ export default function Home() {
     }
   };
 
-  // ✅ PERBAIKAN 2: Tambahkan fungsi delay untuk retry
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-  // ✅ PERBAIKAN 3: Fungsi untuk extract wait time dari error message
   const extractWaitTime = (errorMessage) => {
     const match = errorMessage.match(/try again in ([\d.]+)s/);
     if (match) {
-      return parseFloat(match[1]) * 1000; // Convert ke milliseconds
+      return parseFloat(match[1]) * 1000;
     }
-    return 6000; // Default 6 detik jika tidak ketemu
+    return 6000;
   };
 
-  // ✅ PERBAIKAN 4: Tambahkan retry logic dengan exponential backoff
+  // ✅ FUNGSI UNTUK EKSEKUSI TOOL
+  const executeToolCall = (toolName, args, currentFs) => {
+    switch(toolName) {
+      case 'create_directory':
+        const newFs = { ...currentFs };
+        newFs[args.path] = { type: 'directory', created_at: new Date().toISOString() };
+        addLog(`📁 Direktori dibuat: ${args.path}`, 'success');
+        return {
+          success: true,
+          message: `Direktori ${args.path} berhasil dibuat`,
+          filesystem: newFs
+        };
+
+      case 'create_file':
+        const fsWithFile = { ...currentFs };
+        fsWithFile[args.path] = { 
+          type: 'file', 
+          content: args.content,
+          created_at: new Date().toISOString() 
+        };
+        addLog(`📄 File dibuat: ${args.path}`, 'success');
+        return {
+          success: true,
+          message: `File ${args.path} berhasil dibuat`,
+          filesystem: fsWithFile
+        };
+
+      case 'write_to_file':
+        const fsWritten = { ...currentFs };
+        if (fsWritten[args.path]) {
+          fsWritten[args.path].content = args.content;
+          fsWritten[args.path].updated_at = new Date().toISOString();
+        } else {
+          fsWritten[args.path] = {
+            type: 'file',
+            content: args.content,
+            created_at: new Date().toISOString()
+          };
+        }
+        addLog(`✏️ Menulis ke file: ${args.path}`, 'success');
+        return {
+          success: true,
+          message: `Konten berhasil ditulis ke ${args.path}`,
+          filesystem: fsWritten
+        };
+
+      case 'list_directory':
+        const dirPath = args.path || '/';
+        const items = Object.keys(currentFs).filter(p => p.startsWith(dirPath));
+        addLog(`📋 List direktori: ${dirPath} (${items.length} item)`, 'info');
+        return {
+          success: true,
+          items: items,
+          message: `Ditemukan ${items.length} item di ${dirPath}`
+        };
+
+      case 'download_file':
+        addLog(`⬇️ Download: ${args.url} → ${args.destination}`, 'info');
+        const fsDownload = { ...currentFs };
+        fsDownload[args.destination] = {
+          type: 'file',
+          content: `[Downloaded from ${args.url}]`,
+          url: args.url,
+          created_at: new Date().toISOString()
+        };
+        return {
+          success: true,
+          message: `File dari ${args.url} di-download ke ${args.destination}`,
+          filesystem: fsDownload
+        };
+
+      case 'execute_command':
+        addLog(`⚙️ Execute: ${args.command}`, 'info');
+        return {
+          success: true,
+          output: `Command '${args.command}' executed successfully (simulated)`,
+          message: 'Command berhasil dijalankan'
+        };
+
+      case 'register_api_key':
+        addLog(`🔑 Register API key: ${args.key_name}`, 'success');
+        return {
+          success: true,
+          message: `API key ${args.key_name} berhasil didaftarkan`
+        };
+
+      case 'complete_task':
+        addLog(`✅ Task selesai: ${args.summary}`, 'success');
+        return {
+          success: true,
+          message: 'Task completed',
+          summary: args.summary
+        };
+
+      default:
+        addLog(`❓ Unknown tool: ${toolName}`, 'warning');
+        return {
+          success: false,
+          message: `Tool ${toolName} tidak dikenali`
+        };
+    }
+  };
+
   const callBackendAPI = async (messages, tools, retryAttempt = 0) => {
+    const MAX_RETRIES = 3;
+    
     try {
       const response = await fetch(backendUrl + '/api/groq/chat', {
         method: 'POST',
@@ -93,8 +194,8 @@ export default function Home() {
         body: JSON.stringify({
           model: 'llama-3.3-70b-versatile',
           messages: messages,
-          temperature: 0.7,
-          max_tokens: 1500, // ✅ PERBAIKAN 5: Kurangi max_tokens dari 2000 ke 1500
+          temperature: 0.5,
+          max_tokens: 1500,
           tools: tools || undefined,
           tool_choice: tools ? 'auto' : undefined
         })
@@ -103,18 +204,17 @@ export default function Home() {
       if (!response.ok) {
         const errorData = await response.json();
         
-        // ✅ PERBAIKAN 6: Handle rate limit error khusus
         if (errorData.error?.code === 'rate_limit_exceeded') {
           if (retryAttempt < MAX_RETRIES) {
             const waitTime = extractWaitTime(errorData.error.message);
-            const retryDelay = Math.max(waitTime, (retryAttempt + 1) * 2000); // Minimum 2 detik per retry
+            const retryDelay = Math.max(waitTime, (retryAttempt + 1) * 2000);
             
-            addLog(`⏳ Rate limit tercapai. Retry ${retryAttempt + 1}/${MAX_RETRIES} dalam ${Math.ceil(retryDelay / 1000)} detik...`, 'warning');
+            addLog(`⏳ Rate limit. Retry ${retryAttempt + 1}/${MAX_RETRIES} dalam ${Math.ceil(retryDelay / 1000)}s...`, 'warning');
             
             await sleep(retryDelay);
             return callBackendAPI(messages, tools, retryAttempt + 1);
           } else {
-            throw new Error('Rate limit exceeded setelah ' + MAX_RETRIES + ' retry. Tunggu beberapa menit dan coba lagi.');
+            throw new Error('Rate limit exceeded setelah ' + MAX_RETRIES + ' retry');
           }
         }
         
@@ -123,7 +223,6 @@ export default function Home() {
 
       return await response.json();
     } catch (error) {
-      // ✅ PERBAIKAN 7: Handle network errors
       if (error.message.includes('fetch')) {
         throw new Error('Koneksi gagal. Cek internet atau backend URL.');
       }
@@ -145,111 +244,238 @@ export default function Home() {
     }
 
     setIsRunning(true);
-    setRetryCount(0); // Reset retry count
-    addLog('Agent mulai bekerja...', 'info');
+    setVirtualFileSystem({}); // Reset file system
+    addLog('🚀 Agent mulai bekerja...', 'info');
     
     try {
       let systemPrompt = '';
       let userPrompt = '';
 
       if (useSkillMode && skillFile) {
-        // ✅ PERBAIKAN 8: Batasi panjang SKILL.md untuk mengurangi token usage
-        const maxSkillLength = 3000; // Batasi karakter
+        const maxSkillLength = 4000;
         const truncatedContent = skillFile.content.length > maxSkillLength 
-          ? skillFile.content.substring(0, maxSkillLength) + '...[dipotong]'
+          ? skillFile.content.substring(0, maxSkillLength) + '...[truncated]'
           : skillFile.content;
           
-        systemPrompt = 'Anda adalah autonomous agent yang mengikuti instruksi dari SKILL.md. Jawab singkat dan padat.';
-        userPrompt = 'SKILL.md:\n' + truncatedContent + '\n\nInstruksi: ' + (instruction || 'Ikuti SKILL.md');
-        addLog('Mode: Skill-based', 'info');
+        systemPrompt = `Anda adalah autonomous agent yang HARUS menjalankan setiap instruksi dari SKILL.md secara detail dan bertahap.
+
+PENTING:
+- Baca SKILL.md dengan teliti
+- Jalankan SETIAP langkah yang diminta
+- Gunakan tools yang tersedia untuk eksekusi
+- Jangan hanya merencanakan, tapi LAKUKAN
+- Laporkan setiap action yang Anda lakukan
+
+Anda memiliki tools untuk:
+- create_directory: buat direktori
+- create_file: buat file baru
+- write_to_file: tulis konten ke file
+- download_file: download dari URL
+- execute_command: jalankan command
+- register_api_key: daftarkan API key
+- complete_task: selesaikan task`;
+
+        userPrompt = `SKILL.md:\n${truncatedContent}\n\nInstruksi: ${instruction || 'Ikuti semua langkah di SKILL.md dengan detail'}`;
+        addLog('Mode: Skill-based (Execution)', 'info');
       } else {
-        systemPrompt = 'Anda adalah autonomous agent yang pintar. Berikan jawaban singkat, jelas, dan langsung ke inti.';
+        systemPrompt = 'Anda adalah autonomous agent yang pintar dan actionable. Jalankan task dengan tool yang tersedia.';
         userPrompt = instruction;
         addLog('Mode: Autonomous', 'info');
       }
 
-      // ✅ PERBAIKAN 9: Sederhanakan tool definition untuk mengurangi tokens
+      // ✅ TOOLS LENGKAP UNTUK EKSEKUSI
       const tools = [
         {
           type: 'function',
           function: {
-            name: 'analyze_task',
-            description: 'Analisis task jadi langkah-langkah',
+            name: 'create_directory',
+            description: 'Buat direktori baru',
             parameters: {
               type: 'object',
               properties: {
-                task_breakdown: { 
-                  type: 'array', 
-                  items: { type: 'string' },
-                  description: 'List langkah (max 5)'
-                }
+                path: { type: 'string', description: 'Path direktori (misal: /home/user/project)' }
               },
-              required: ['task_breakdown']
+              required: ['path']
+            }
+          }
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'create_file',
+            description: 'Buat file baru dengan konten',
+            parameters: {
+              type: 'object',
+              properties: {
+                path: { type: 'string', description: 'Path file lengkap' },
+                content: { type: 'string', description: 'Isi file' }
+              },
+              required: ['path', 'content']
+            }
+          }
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'write_to_file',
+            description: 'Tulis atau update konten file',
+            parameters: {
+              type: 'object',
+              properties: {
+                path: { type: 'string' },
+                content: { type: 'string' }
+              },
+              required: ['path', 'content']
+            }
+          }
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'download_file',
+            description: 'Download file dari URL',
+            parameters: {
+              type: 'object',
+              properties: {
+                url: { type: 'string', description: 'URL sumber' },
+                destination: { type: 'string', description: 'Path tujuan' }
+              },
+              required: ['url', 'destination']
+            }
+          }
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'execute_command',
+            description: 'Jalankan command shell',
+            parameters: {
+              type: 'object',
+              properties: {
+                command: { type: 'string', description: 'Command untuk dijalankan' }
+              },
+              required: ['command']
+            }
+          }
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'register_api_key',
+            description: 'Daftarkan API key',
+            parameters: {
+              type: 'object',
+              properties: {
+                key_name: { type: 'string', description: 'Nama API key' },
+                key_value: { type: 'string', description: 'Value API key' }
+              },
+              required: ['key_name']
+            }
+          }
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'complete_task',
+            description: 'Tandai task sebagai selesai dengan summary',
+            parameters: {
+              type: 'object',
+              properties: {
+                summary: { type: 'string', description: 'Ringkasan apa yang sudah dilakukan' }
+              },
+              required: ['summary']
             }
           }
         }
       ];
 
-      addThought('Menganalisis task...', null);
+      addThought('📖 Membaca instruksi dari SKILL.md...', null);
       
       const messages = [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
       ];
 
-      const firstResponse = await callBackendAPI(messages, tools);
-      const firstMessage = firstResponse.choices[0].message;
+      let currentFileSystem = {};
+      let iterationCount = 0;
+      const MAX_ITERATIONS = 10; // Batasi loop untuk safety
 
-      if (firstMessage.content) {
-        addThought(firstMessage.content, null);
-      }
+      // ✅ AGENT LOOP - terus jalankan sampai selesai
+      while (iterationCount < MAX_ITERATIONS) {
+        iterationCount++;
+        addLog(`🔄 Iterasi ${iterationCount}...`, 'info');
 
-      if (firstMessage.tool_calls && firstMessage.tool_calls.length > 0) {
-        messages.push(firstMessage);
+        const response = await callBackendAPI(messages, tools);
+        const assistantMessage = response.choices[0].message;
 
-        for (const toolCall of firstMessage.tool_calls) {
+        // Tampilkan pemikiran agent
+        if (assistantMessage.content) {
+          addThought(assistantMessage.content, `Step ${iterationCount}`);
+        }
+
+        // Cek apakah ada tool calls
+        if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+          // Tidak ada tool calls = agent sudah selesai
+          addLog('✅ Agent selesai (no more actions)', 'success');
+          break;
+        }
+
+        // Tambahkan assistant message ke conversation
+        messages.push(assistantMessage);
+
+        // Eksekusi semua tool calls
+        let allToolResults = [];
+        for (const toolCall of assistantMessage.tool_calls) {
           const functionName = toolCall.function.name;
           const functionArgs = JSON.parse(toolCall.function.arguments);
 
-          addLog('Tool: ' + functionName, 'info');
+          addLog(`🔧 Tool: ${functionName}`, 'info');
 
-          // ✅ PERBAIKAN 10: Batasi task breakdown max 5 items
-          const taskBreakdown = functionArgs.task_breakdown 
-            ? functionArgs.task_breakdown.slice(0, 5)
-            : [];
+          // Eksekusi tool
+          const toolResult = executeToolCall(functionName, functionArgs, currentFileSystem);
+          
+          // Update file system jika ada
+          if (toolResult.filesystem) {
+            currentFileSystem = toolResult.filesystem;
+            setVirtualFileSystem(toolResult.filesystem);
+          }
 
-          const toolResult = {
-            success: true,
-            breakdown: taskBreakdown,
-            message: 'OK'
-          };
-
-          addLog('Task breakdown: ' + taskBreakdown.length + ' langkah', 'success');
-
+          // Tambahkan tool result ke conversation
           messages.push({
             role: 'tool',
             tool_call_id: toolCall.id,
             content: JSON.stringify(toolResult)
           });
+
+          allToolResults.push(toolResult);
+
+          // Jika tool adalah complete_task, stop loop
+          if (functionName === 'complete_task') {
+            addLog('🎉 Task ditandai selesai oleh agent!', 'success');
+            addThought(`Task Summary: ${toolResult.summary}`, 'COMPLETED');
+            iterationCount = MAX_ITERATIONS; // Force exit loop
+            break;
+          }
         }
 
-        // ✅ PERBAIKAN 11: Tambahkan delay sebelum request kedua
-        await sleep(1000); // Wait 1 detik
-        
-        const secondResponse = await callBackendAPI(messages, null);
-        const finalMessage = secondResponse.choices[0].message;
+        // Delay sebelum iterasi berikutnya
+        await sleep(1500);
+      }
 
-        if (finalMessage.content) {
-          addThought(finalMessage.content, 'Result');
-          addLog('Agent selesai!', 'success');
-        }
-      } else {
-        addLog('Agent selesai!', 'success');
+      if (iterationCount >= MAX_ITERATIONS) {
+        addLog('⚠️ Reached max iterations', 'warning');
+      }
+
+      // Tampilkan file system hasil eksekusi
+      const fileCount = Object.keys(currentFileSystem).length;
+      if (fileCount > 0) {
+        addLog(`📦 Total ${fileCount} file/direktori dibuat`, 'success');
+        addThought(`File System:\n${JSON.stringify(currentFileSystem, null, 2)}`, 'File System');
       }
 
     } catch (error) {
-      addLog('Error: ' + error.message, 'error');
-      addThought('Error: ' + error.message, null);
+      addLog('❌ Error: ' + error.message, 'error');
+      addThought('Error: ' + error.message, 'ERROR');
     } finally {
       setIsRunning(false);
     }
@@ -258,6 +484,7 @@ export default function Home() {
   const clearLogs = () => {
     setLogs([]);
     setAgentThoughts([]);
+    setVirtualFileSystem({});
   };
 
   const resetApiKey = () => {
@@ -270,14 +497,14 @@ export default function Home() {
   if (!isApiKeySet) {
     return (
       <>
-        <Head><title>Groq Agent</title></Head>
+        <Head><title>Groq Agent - Executor</title></Head>
         <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-8 flex items-center justify-center">
           <div className="max-w-md w-full bg-white/10 backdrop-blur-lg rounded-2xl p-8 shadow-2xl border border-white/20">
             <div className="flex justify-center mb-6">
               <div className="w-16 h-16 bg-purple-500 rounded-full flex items-center justify-center text-4xl">🤖</div>
             </div>
             <h1 className="text-3xl font-bold text-white text-center mb-2">Groq Agent</h1>
-            <p className="text-purple-200 text-center mb-8">Paste API Key</p>
+            <p className="text-purple-200 text-center mb-8">Executor Edition</p>
             <input
               type="password"
               value={apiKey}
@@ -297,7 +524,7 @@ export default function Home() {
 
   return (
     <>
-      <Head><title>Groq Agent</title></Head>
+      <Head><title>Groq Agent - Executor</title></Head>
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-6">
         <div className="max-w-7xl mx-auto">
           <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-6 border border-white/20">
@@ -305,8 +532,8 @@ export default function Home() {
               <div className="flex items-center gap-3">
                 <div className="text-4xl">🤖</div>
                 <div>
-                  <h1 className="text-2xl font-bold text-white">Groq Agent</h1>
-                  <p className="text-purple-200 text-sm">Llama 3.3 70B + Auto Retry</p>
+                  <h1 className="text-2xl font-bold text-white">Groq Agent Executor</h1>
+                  <p className="text-purple-200 text-sm">Llama 3.3 70B • Action-Ready</p>
                 </div>
               </div>
               <button onClick={resetApiKey} className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-lg">
@@ -317,7 +544,7 @@ export default function Home() {
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
-              <h2 className="text-xl font-bold text-white mb-4">Control</h2>
+              <h2 className="text-xl font-bold text-white mb-4">Control Panel</h2>
               
               <div className="flex gap-2 mb-4">
                 <button onClick={() => setUseSkillMode(false)} className={'flex-1 py-2 px-4 rounded-lg font-medium ' + (!useSkillMode ? 'bg-purple-500 text-white' : 'bg-white/10 text-purple-200')}>
@@ -338,27 +565,27 @@ export default function Home() {
               )}
 
               <div className="mb-4">
-                <label className="block text-purple-200 text-sm mb-2">Instruksi</label>
+                <label className="block text-purple-200 text-sm mb-2">Instruksi Tambahan (Opsional)</label>
                 <textarea
                   value={instruction}
                   onChange={(e) => setInstruction(e.target.value)}
-                  placeholder="Tulis instruksi..."
+                  placeholder="Instruksi tambahan atau biarkan kosong untuk ikuti SKILL.md..."
                   className="w-full px-4 py-3 bg-white/10 border border-white/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 h-32 resize-none"
                 />
               </div>
 
               <div className="flex gap-2">
-                <button onClick={executeAgentTask} disabled={isRunning || (!useSkillMode && !instruction.trim()) || (useSkillMode && !skillFile)} className="flex-1 bg-gradient-to-r from-purple-500 to-pink-500 text-white py-3 rounded-lg font-semibold hover:from-purple-600 hover:to-pink-600 disabled:opacity-50">
-                  {isRunning ? 'Running...' : 'Jalankan'}
+                <button onClick={executeAgentTask} disabled={isRunning || (useSkillMode && !skillFile)} className="flex-1 bg-gradient-to-r from-purple-500 to-pink-500 text-white py-3 rounded-lg font-semibold hover:from-purple-600 hover:to-pink-600 disabled:opacity-50">
+                  {isRunning ? '⚙️ Executing...' : '▶️ Jalankan'}
                 </button>
                 <button onClick={clearLogs} className="px-4 py-3 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-lg">Clear</button>
               </div>
             </div>
 
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
-              <h2 className="text-xl font-bold text-white mb-4">Logs</h2>
+              <h2 className="text-xl font-bold text-white mb-4">📋 Execution Logs</h2>
               <div className="bg-black/30 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm">
-                {logs.length === 0 ? <p className="text-gray-400 text-center mt-10">No logs...</p> : logs.map((log, idx) => (
+                {logs.length === 0 ? <p className="text-gray-400 text-center mt-10">Waiting for execution...</p> : logs.map((log, idx) => (
                   <div key={idx} className={'mb-2 ' + (log.type === 'error' ? 'text-red-400' : log.type === 'success' ? 'text-green-400' : log.type === 'warning' ? 'text-yellow-400' : 'text-blue-300')}>
                     <span className="text-gray-500">[{log.timestamp}]</span> {log.message}
                   </div>
@@ -368,18 +595,45 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mt-6 border border-white/20">
-            <h2 className="text-xl font-bold text-white mb-4">🧠 Reasoning</h2>
-            <div className="bg-black/30 rounded-lg p-4 max-h-96 overflow-y-auto">
-              {agentThoughts.length === 0 ? <p className="text-gray-400 text-center">Waiting...</p> : agentThoughts.map((thought, idx) => (
-                <div key={idx} className="mb-4 p-4 bg-white/5 rounded-lg border border-purple-500/30">
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-purple-400 font-semibold">[{thought.timestamp}]</span>
-                    {thought.action && <span className="px-2 py-1 bg-purple-500/30 text-purple-200 text-xs rounded">{thought.action}</span>}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+            <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
+              <h2 className="text-xl font-bold text-white mb-4">🧠 Agent Reasoning</h2>
+              <div className="bg-black/30 rounded-lg p-4 max-h-96 overflow-y-auto">
+                {agentThoughts.length === 0 ? <p className="text-gray-400 text-center">Waiting...</p> : agentThoughts.map((thought, idx) => (
+                  <div key={idx} className="mb-4 p-4 bg-white/5 rounded-lg border border-purple-500/30">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-purple-400 font-semibold">[{thought.timestamp}]</span>
+                      {thought.action && <span className="px-2 py-1 bg-purple-500/30 text-purple-200 text-xs rounded">{thought.action}</span>}
+                    </div>
+                    <p className="text-white whitespace-pre-wrap text-sm">{thought.thought}</p>
                   </div>
-                  <p className="text-white whitespace-pre-wrap">{thought.thought}</p>
-                </div>
-              ))}
+                ))}
+              </div>
+            </div>
+
+            <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
+              <h2 className="text-xl font-bold text-white mb-4">📦 Virtual File System</h2>
+              <div className="bg-black/30 rounded-lg p-4 max-h-96 overflow-y-auto">
+                {Object.keys(virtualFileSystem).length === 0 ? (
+                  <p className="text-gray-400 text-center">No files created yet...</p>
+                ) : (
+                  <div className="space-y-2">
+                    {Object.entries(virtualFileSystem).map(([path, data], idx) => (
+                      <div key={idx} className="p-3 bg-white/5 rounded border border-green-500/30">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-xl">{data.type === 'directory' ? '📁' : '📄'}</span>
+                          <span className="text-green-400 font-mono text-sm">{path}</span>
+                        </div>
+                        {data.content && (
+                          <div className="ml-7 text-xs text-gray-400 mt-1 font-mono overflow-x-auto">
+                            {data.content.substring(0, 100)}{data.content.length > 100 ? '...' : ''}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
