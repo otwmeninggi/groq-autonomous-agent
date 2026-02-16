@@ -79,8 +79,8 @@ export default function Home() {
     return 6000;
   };
 
-  // ✅ FUNGSI UNTUK EKSEKUSI TOOL
-  const executeToolCall = (toolName, args, currentFs) => {
+  // ✅ FUNGSI UNTUK EKSEKUSI TOOL (ASYNC)
+  const executeToolCall = async (toolName, args, currentFs) => {
     switch(toolName) {
       case 'create_directory':
         const newFs = { ...currentFs };
@@ -159,34 +159,63 @@ export default function Home() {
           addLog(`🎲 Random name generated: ${randomName}`, 'success');
         }
         
-        addLog(`⚙️ Execute: ${processedCommand}`, 'info');
+        addLog(`⚙️ Executing: ${processedCommand}`, 'info');
         
-        // Simulasi output yang lebih realistis
-        const mockOutput = {
-          status: 'success',
-          message: 'Command executed successfully',
-          command: processedCommand,
-          timestamp: new Date().toISOString(),
-          response: processedCommand.includes('register') 
-            ? '{"success": true, "agent_id": "' + Math.random().toString(36).substring(2, 12) + '", "message": "Agent registered successfully"}'
-            : 'Command completed'
-        };
-        
-        addLog(`✅ Output: ${mockOutput.response}`, 'success');
-        
-        // Save ke commandOutputs state
-        setCommandOutputs(prev => [...prev, {
-          timestamp: new Date().toLocaleTimeString('id-ID'),
-          command: processedCommand,
-          output: mockOutput.response
-        }]);
-        
-        return {
-          success: true,
-          output: JSON.stringify(mockOutput, null, 2),
-          message: 'Command berhasil dijalankan',
-          command: processedCommand
-        };
+        // Call backend untuk execute command secara real
+        try {
+          const executeResponse = await fetch(backendUrl + '/api/execute-command', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              command: processedCommand
+            })
+          });
+          
+          const executeResult = await executeResponse.json();
+          
+          if (executeResult.success) {
+            // Parse output untuk display
+            let displayOutput = '';
+            if (typeof executeResult.output === 'object') {
+              displayOutput = JSON.stringify(executeResult.output, null, 2);
+            } else {
+              displayOutput = executeResult.output || executeResult.raw_output;
+            }
+            
+            addLog(`✅ Command executed successfully!`, 'success');
+            
+            // Save ke commandOutputs state
+            setCommandOutputs(prev => [...prev, {
+              timestamp: new Date().toLocaleTimeString('id-ID'),
+              command: processedCommand,
+              output: displayOutput
+            }]);
+            
+            return {
+              success: true,
+              output: displayOutput,
+              raw_output: executeResult.raw_output,
+              message: 'Command berhasil dijalankan',
+              command: processedCommand
+            };
+          } else {
+            addLog(`❌ Command failed: ${executeResult.error}`, 'error');
+            return {
+              success: false,
+              output: executeResult.error,
+              message: 'Command gagal dijalankan'
+            };
+          }
+        } catch (fetchError) {
+          addLog(`❌ Failed to execute: ${fetchError.message}`, 'error');
+          return {
+            success: false,
+            output: `Error: ${fetchError.message}`,
+            message: 'Gagal menghubungi backend'
+          };
+        }
 
       case 'register_api_key':
         addLog(`🔑 Register API key: ${args.key_name}`, 'success');
@@ -462,8 +491,8 @@ Anda memiliki tools untuk:
 
           addLog(`🔧 Tool: ${functionName}`, 'info');
 
-          // Eksekusi tool
-          const toolResult = executeToolCall(functionName, functionArgs, currentFileSystem);
+          // Eksekusi tool (AWAIT karena sekarang async)
+          const toolResult = await executeToolCall(functionName, functionArgs, currentFileSystem);
           
           // Update file system jika ada
           if (toolResult.filesystem) {
