@@ -2,8 +2,16 @@ import { useState, useRef, useEffect } from 'react';
 import Head from 'next/head';
 
 export default function Home() {
-  const [apiKey, setApiKey] = useState('');
+  const [apiKeys, setApiKeys] = useState({
+    groq: '',
+    gemini: '',
+    openrouter: '',
+    together: ''
+  });
+  const [showSettings, setShowSettings] = useState(false);
   const [isApiKeySet, setIsApiKeySet] = useState(false);
+  const [activeProviders, setActiveProviders] = useState([]);
+  
   const [instruction, setInstruction] = useState('');
   const [skillFile, setSkillFile] = useState(null);
   const [useSkillMode, setUseSkillMode] = useState(false);
@@ -11,18 +19,22 @@ export default function Home() {
   const [logs, setLogs] = useState([]);
   const [agentThoughts, setAgentThoughts] = useState([]);
   const [commandOutputs, setCommandOutputs] = useState([]);
-  const [executionMode, setExecutionMode] = useState('backend'); // 'backend' or 'direct'
+  const [virtualFileSystem, setVirtualFileSystem] = useState({});
+  const [currentProvider, setCurrentProvider] = useState(null);
 
   const logsEndRef = useRef(null);
   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
 
-  const [virtualFileSystem, setVirtualFileSystem] = useState({});
-
   useEffect(() => {
-    const savedKey = localStorage.getItem('groq_api_key');
-    if (savedKey) {
-      setApiKey(savedKey);
-      setIsApiKeySet(true);
+    const saved = localStorage.getItem('ai_api_keys');
+    if (saved) {
+      const keys = JSON.parse(saved);
+      setApiKeys(keys);
+      const active = Object.keys(keys).filter(k => keys[k]);
+      if (active.length > 0) {
+        setIsApiKeySet(true);
+        setActiveProviders(active);
+      }
     }
   }, []);
 
@@ -40,20 +52,19 @@ export default function Home() {
     setAgentThoughts(prev => [...prev, { timestamp, thought, action: action || null }]);
   };
 
-  const handleApiKeySubmit = () => {
-    if (!apiKey.trim()) {
-      alert('Masukkan API key!');
-      return;
-    }
+  const handleSaveApiKeys = () => {
+    const active = Object.keys(apiKeys).filter(k => apiKeys[k] && apiKeys[k].trim());
     
-    if (!apiKey.startsWith('gsk_')) {
-      alert('API key harus diawali gsk_');
+    if (active.length === 0) {
+      alert('Masukkan minimal 1 API key!');
       return;
     }
 
     setIsApiKeySet(true);
-    localStorage.setItem('groq_api_key', apiKey);
-    addLog('API Key tersimpan!', 'success');
+    setActiveProviders(active);
+    localStorage.setItem('ai_api_keys', JSON.stringify(apiKeys));
+    setShowSettings(false);
+    addLog(`✅ ${active.length} provider tersimpan: ${active.join(', ')}`, 'success');
   };
 
   const handleFileUpload = (e) => {
@@ -63,7 +74,7 @@ export default function Home() {
       reader.onload = (event) => {
         setSkillFile({ name: file.name, content: event.target.result });
         setUseSkillMode(true);
-        addLog('File ' + file.name + ' berhasil diupload', 'success');
+        addLog('File ' + file.name + ' uploaded', 'success');
       };
       reader.readAsText(file);
     }
@@ -71,15 +82,6 @@ export default function Home() {
 
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-  const extractWaitTime = (errorMessage) => {
-    const match = errorMessage.match(/try again in ([\d.]+)s/);
-    if (match) {
-      return parseFloat(match[1]) * 1000;
-    }
-    return 6000;
-  };
-
-  // ✅ Parse curl command menjadi fetch options
   const parseCurlCommand = (curlCommand) => {
     const urlMatch = curlCommand.match(/https?:\/\/[^\s]+/);
     const url = urlMatch ? urlMatch[0] : null;
@@ -100,25 +102,13 @@ export default function Home() {
     return { url, method, headers, body };
   };
 
-  // ✅ Execute curl via direct fetch (fallback jika backend ga ada endpoint)
   const executeCurlDirect = async (curlCommand) => {
     try {
       const { url, method, headers, body } = parseCurlCommand(curlCommand);
+      if (!url) throw new Error('Invalid curl: URL not found');
       
-      if (!url) {
-        throw new Error('Invalid curl command: URL not found');
-      }
-      
-      addLog(`📡 Direct fetch to: ${url}`, 'info');
-      
-      const fetchOptions = {
-        method,
-        headers,
-      };
-      
-      if (body && method !== 'GET') {
-        fetchOptions.body = body;
-      }
+      const fetchOptions = { method, headers };
+      if (body && method !== 'GET') fetchOptions.body = body;
       
       const response = await fetch(url, fetchOptions);
       const data = await response.json();
@@ -126,500 +116,202 @@ export default function Home() {
       return {
         success: response.ok,
         output: data,
-        raw_output: JSON.stringify(data, null, 2),
-        status: response.status
+        raw_output: JSON.stringify(data, null, 2)
       };
     } catch (error) {
       throw new Error(`Direct fetch failed: ${error.message}`);
     }
   };
 
-  // ✅ Execute curl via backend
   const executeCurlBackend = async (curlCommand) => {
-    const executeResponse = await fetch(backendUrl + '/api/execute-command', {
+    const response = await fetch(backendUrl + '/api/execute-command', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        command: curlCommand
-      })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: curlCommand })
     });
     
-    if (!executeResponse.ok) {
-      throw new Error(`Backend returned ${executeResponse.status}`);
-    }
-    
-    return await executeResponse.json();
+    if (!response.ok) throw new Error(`Backend ${response.status}`);
+    return await response.json();
   };
 
-  // ✅ FUNGSI UNTUK EKSEKUSI TOOL (ASYNC)
   const executeToolCall = async (toolName, args, currentFs) => {
     switch(toolName) {
       case 'create_directory':
         const newFs = { ...currentFs };
         newFs[args.path] = { type: 'directory', created_at: new Date().toISOString() };
-        addLog(`📁 Direktori dibuat: ${args.path}`, 'success');
-        return {
-          success: true,
-          message: `Direktori ${args.path} berhasil dibuat`,
-          filesystem: newFs
-        };
+        addLog(`📁 ${args.path}`, 'success');
+        return { success: true, filesystem: newFs };
 
       case 'create_file':
-        const fsWithFile = { ...currentFs };
-        fsWithFile[args.path] = { 
-          type: 'file', 
-          content: args.content,
-          created_at: new Date().toISOString() 
-        };
-        addLog(`📄 File dibuat: ${args.path}`, 'success');
-        return {
-          success: true,
-          message: `File ${args.path} berhasil dibuat`,
-          filesystem: fsWithFile
-        };
+        const fsFile = { ...currentFs };
+        fsFile[args.path] = { type: 'file', content: args.content, created_at: new Date().toISOString() };
+        addLog(`📄 ${args.path}`, 'success');
+        return { success: true, filesystem: fsFile };
 
       case 'write_to_file':
-        const fsWritten = { ...currentFs };
-        if (fsWritten[args.path]) {
-          fsWritten[args.path].content = args.content;
-          fsWritten[args.path].updated_at = new Date().toISOString();
-        } else {
-          fsWritten[args.path] = {
-            type: 'file',
-            content: args.content,
-            created_at: new Date().toISOString()
-          };
-        }
-        addLog(`✏️ Menulis ke file: ${args.path}`, 'success');
-        return {
-          success: true,
-          message: `Konten berhasil ditulis ke ${args.path}`,
-          filesystem: fsWritten
-        };
-
-      case 'list_directory':
-        const dirPath = args.path || '/';
-        const items = Object.keys(currentFs).filter(p => p.startsWith(dirPath));
-        addLog(`📋 List direktori: ${dirPath} (${items.length} item)`, 'info');
-        return {
-          success: true,
-          items: items,
-          message: `Ditemukan ${items.length} item di ${dirPath}`
-        };
-
-      case 'download_file':
-        addLog(`⬇️ Download: ${args.url} → ${args.destination}`, 'info');
-        const fsDownload = { ...currentFs };
-        fsDownload[args.destination] = {
-          type: 'file',
-          content: `[Downloaded from ${args.url}]`,
-          url: args.url,
-          created_at: new Date().toISOString()
-        };
-        return {
-          success: true,
-          message: `File dari ${args.url} di-download ke ${args.destination}`,
-          filesystem: fsDownload
-        };
+        const fsWrite = { ...currentFs };
+        fsWrite[args.path] = { type: 'file', content: args.content, created_at: new Date().toISOString() };
+        addLog(`✏️ ${args.path}`, 'success');
+        return { success: true, filesystem: fsWrite };
 
       case 'execute_command':
-        // Generate random agent name jika ada placeholder
-        let processedCommand = args.command;
-        if (processedCommand.includes('YourAgentName')) {
-          const randomName = 'Agent_' + Math.random().toString(36).substring(2, 10);
-          processedCommand = processedCommand.replace(/YourAgentName/g, randomName);
-          addLog(`🎲 Random name: ${randomName}`, 'success');
+        let cmd = args.command;
+        if (cmd.includes('YourAgentName')) {
+          const name = 'Agent_' + Math.random().toString(36).substring(2, 10);
+          cmd = cmd.replace(/YourAgentName/g, name);
+          addLog(`🎲 ${name}`, 'success');
         }
         
-        addLog(`⚙️ Executing: ${processedCommand}`, 'info');
+        addLog(`⚙️ ${cmd}`, 'info');
         
-        let executeResult;
-        
-        // Try backend first, fallback to direct
+        let result;
         try {
-          if (executionMode === 'backend') {
-            addLog(`📡 Mode: Backend execution`, 'info');
-            executeResult = await executeCurlBackend(processedCommand);
-          } else {
-            addLog(`📡 Mode: Direct fetch`, 'info');
-            executeResult = await executeCurlDirect(processedCommand);
-          }
-        } catch (backendError) {
-          addLog(`⚠️ Backend failed: ${backendError.message}`, 'warning');
-          addLog(`🔄 Fallback to direct fetch...`, 'info');
-          
+          result = await executeCurlBackend(cmd);
+        } catch (e) {
           try {
-            executeResult = await executeCurlDirect(processedCommand);
-            setExecutionMode('direct'); // Switch to direct mode
-          } catch (directError) {
-            addLog(`❌ Direct fetch also failed: ${directError.message}`, 'error');
-            return {
-              success: false,
-              output: `Both backend and direct execution failed. Error: ${directError.message}`,
-              message: 'Execution failed'
-            };
+            result = await executeCurlDirect(cmd);
+          } catch (e2) {
+            return { success: false, output: e2.message };
           }
         }
         
-        if (executeResult.success) {
-          let displayOutput = '';
-          if (typeof executeResult.output === 'object') {
-            displayOutput = JSON.stringify(executeResult.output, null, 2);
-          } else {
-            displayOutput = executeResult.output || executeResult.raw_output;
-          }
+        if (result.success) {
+          let output = typeof result.output === 'object' 
+            ? JSON.stringify(result.output, null, 2)
+            : result.output;
           
-          addLog(`✅ Command executed successfully!`, 'success');
-          
+          addLog(`✅ Executed`, 'success');
           setCommandOutputs(prev => [...prev, {
             timestamp: new Date().toLocaleTimeString('id-ID'),
-            command: processedCommand,
-            output: displayOutput
+            command: cmd,
+            output: output
           }]);
           
-          return {
-            success: true,
-            output: displayOutput,
-            raw_output: executeResult.raw_output,
-            message: 'Command berhasil dijalankan',
-            command: processedCommand
-          };
-        } else {
-          addLog(`❌ Command failed: ${executeResult.error}`, 'error');
-          return {
-            success: false,
-            output: executeResult.error,
-            message: 'Command gagal dijalankan'
-          };
+          return { success: true, output };
         }
-
-      case 'register_api_key':
-        addLog(`🔑 Register API key: ${args.key_name}`, 'success');
-        return {
-          success: true,
-          message: `API key ${args.key_name} berhasil didaftarkan`
-        };
+        return { success: false, output: result.error };
 
       case 'complete_task':
-        addLog(`✅ Task selesai: ${args.summary}`, 'success');
-        return {
-          success: true,
-          message: 'Task completed',
-          summary: args.summary
-        };
+        addLog(`✅ ${args.summary}`, 'success');
+        return { success: true, summary: args.summary };
 
       default:
-        addLog(`❓ Unknown tool: ${toolName}`, 'warning');
-        return {
-          success: false,
-          message: `Tool ${toolName} tidak dikenali`
-        };
+        return { success: false };
     }
   };
 
-  const callBackendAPI = async (messages, tools, retryAttempt = 0) => {
-    const MAX_RETRIES = 3;
-    
-    // ✅ Estimate token usage (rough estimation)
-    const estimateTokens = (msgs) => {
-      const text = JSON.stringify(msgs);
-      return Math.ceil(text.length / 4); // Rough: 1 token ≈ 4 chars
-    };
-    
-    const estimatedTokens = estimateTokens(messages);
-    if (estimatedTokens > 10000) {
-      addLog(`⚠️ High token usage: ~${estimatedTokens} tokens`, 'warning');
-    }
-    
-    try {
-      const response = await fetch(backendUrl + '/api/groq/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': apiKey,
-        },
-        body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
-          messages: messages,
-          temperature: 0.5,
-          max_tokens: 1500,
-          tools: tools || undefined,
-          tool_choice: tools ? 'auto' : undefined
-        })
-      });
+  const callMultiProviderAPI = async (messages, tools) => {
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKeys.groq) headers['X-API-Key'] = apiKeys.groq;
+    if (apiKeys.gemini) headers['X-Gemini-Key'] = apiKeys.gemini;
+    if (apiKeys.openrouter) headers['X-OpenRouter-Key'] = apiKeys.openrouter;
+    if (apiKeys.together) headers['X-Together-Key'] = apiKeys.together;
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        
-        // Log detailed error untuk debugging
-        console.error('Backend Error Details:', errorData);
-        addLog(`🔍 Debug: ${JSON.stringify(errorData)}`, 'warning');
-        
-        if (errorData.error?.code === 'rate_limit_exceeded') {
-          if (retryAttempt < MAX_RETRIES) {
-            const waitTime = extractWaitTime(errorData.error.message);
-            const retryDelay = Math.max(waitTime, (retryAttempt + 1) * 2000);
-            
-            addLog(`⏳ Rate limit. Retry ${retryAttempt + 1}/${MAX_RETRIES} dalam ${Math.ceil(retryDelay / 1000)}s...`, 'warning');
-            
-            await sleep(retryDelay);
-            return callBackendAPI(messages, tools, retryAttempt + 1);
-          } else {
-            throw new Error('Rate limit exceeded setelah ' + MAX_RETRIES + ' retry');
-          }
-        }
-        
-        // Throw dengan pesan error yang lebih detail
-        const errorMsg = errorData.error?.message || errorData.error || JSON.stringify(errorData);
-        throw new Error(`Backend Error: ${errorMsg}`);
-      }
+    const response = await fetch(backendUrl + '/api/chat', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        messages,
+        tools,
+        temperature: 0.5,
+        max_tokens: 1500,
+        provider_order: activeProviders
+      })
+    });
 
-      return await response.json();
-    } catch (error) {
-      // Network error - retry jika masih ada kesempatan
-      if (error.message.includes('fetch') || error.message.includes('network')) {
-        if (retryAttempt < MAX_RETRIES) {
-          const retryDelay = (retryAttempt + 1) * 3000; // 3s, 6s, 9s
-          addLog(`🔌 Network error. Retry ${retryAttempt + 1}/${MAX_RETRIES} dalam ${retryDelay/1000}s...`, 'warning');
-          await sleep(retryDelay);
-          return callBackendAPI(messages, tools, retryAttempt + 1);
-        }
-        throw new Error('Koneksi gagal setelah ' + MAX_RETRIES + ' retry. Cek internet atau backend URL.');
-      }
-      throw error;
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error || 'API Error');
     }
+
+    const result = await response.json();
+    if (result.provider) {
+      setCurrentProvider(result.provider);
+      addLog(`🔄 Using: ${result.provider}`, 'info');
+    }
+
+    return result;
   };
 
   const executeAgentTask = async () => {
     if (isRunning) return;
-    
-    if (!useSkillMode && !instruction.trim()) {
-      alert('Masukkan instruksi!');
-      return;
-    }
-
-    if (useSkillMode && !skillFile) {
-      alert('Upload SKILL.md dulu!');
-      return;
-    }
+    if (!useSkillMode && !instruction.trim()) return alert('Masukkan instruksi!');
+    if (useSkillMode && !skillFile) return alert('Upload SKILL.md!');
 
     setIsRunning(true);
     setVirtualFileSystem({});
-    addLog('🚀 Agent mulai bekerja...', 'info');
+    addLog('🚀 Starting...', 'info');
     
     try {
-      let systemPrompt = '';
-      let userPrompt = '';
+      let systemPrompt = 'Anda adalah autonomous agent. Jalankan task dengan tools.';
+      let userPrompt = instruction;
 
       if (useSkillMode && skillFile) {
-        const maxSkillLength = 4000;
-        const truncatedContent = skillFile.content.length > maxSkillLength 
-          ? skillFile.content.substring(0, maxSkillLength) + '...[truncated]'
-          : skillFile.content;
-          
-        systemPrompt = `Anda adalah autonomous agent yang HARUS menjalankan setiap instruksi dari SKILL.md secara detail dan bertahap.
-
-PENTING:
-- Baca SKILL.md dengan teliti
-- Jalankan SETIAP langkah yang diminta
-- Gunakan tools yang tersedia untuk eksekusi
-- Jangan hanya merencanakan, tapi LAKUKAN
-- Laporkan setiap action yang Anda lakukan
-
-Anda memiliki tools untuk:
-- create_directory: buat direktori
-- create_file: buat file baru
-- write_to_file: tulis konten ke file
-- download_file: download dari URL
-- execute_command: jalankan command
-- register_api_key: daftarkan API key
-- complete_task: selesaikan task`;
-
-        userPrompt = `SKILL.md:\n${truncatedContent}\n\nInstruksi: ${instruction || 'Ikuti semua langkah di SKILL.md dengan detail'}`;
-        addLog('Mode: Skill-based (Execution)', 'info');
-      } else {
-        systemPrompt = 'Anda adalah autonomous agent yang pintar dan actionable. Jalankan task dengan tool yang tersedia.';
-        userPrompt = instruction;
-        addLog('Mode: Autonomous', 'info');
+        const content = skillFile.content.substring(0, 4000);
+        systemPrompt = 'Anda adalah autonomous agent. JALANKAN setiap instruksi dari SKILL.md.';
+        userPrompt = `SKILL.md:\n${content}\n\n${instruction || 'Ikuti SKILL.md'}`;
       }
 
       const tools = [
-        {
-          type: 'function',
-          function: {
-            name: 'create_directory',
-            description: 'Buat direktori baru',
-            parameters: {
-              type: 'object',
-              properties: {
-                path: { type: 'string', description: 'Path direktori (misal: /home/user/project)' }
-              },
-              required: ['path']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'create_file',
-            description: 'Buat file baru dengan konten',
-            parameters: {
-              type: 'object',
-              properties: {
-                path: { type: 'string', description: 'Path file lengkap' },
-                content: { type: 'string', description: 'Isi file' }
-              },
-              required: ['path', 'content']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'write_to_file',
-            description: 'Tulis atau update konten file',
-            parameters: {
-              type: 'object',
-              properties: {
-                path: { type: 'string' },
-                content: { type: 'string' }
-              },
-              required: ['path', 'content']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'download_file',
-            description: 'Download file dari URL',
-            parameters: {
-              type: 'object',
-              properties: {
-                url: { type: 'string', description: 'URL sumber' },
-                destination: { type: 'string', description: 'Path tujuan' }
-              },
-              required: ['url', 'destination']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'execute_command',
-            description: 'Jalankan command shell',
-            parameters: {
-              type: 'object',
-              properties: {
-                command: { type: 'string', description: 'Command untuk dijalankan' }
-              },
-              required: ['command']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'register_api_key',
-            description: 'Daftarkan API key',
-            parameters: {
-              type: 'object',
-              properties: {
-                key_name: { type: 'string', description: 'Nama API key' },
-                key_value: { type: 'string', description: 'Value API key' }
-              },
-              required: ['key_name']
-            }
-          }
-        },
-        {
-          type: 'function',
-          function: {
-            name: 'complete_task',
-            description: 'Tandai task sebagai selesai dengan summary',
-            parameters: {
-              type: 'object',
-              properties: {
-                summary: { type: 'string', description: 'Ringkasan apa yang sudah dilakukan' }
-              },
-              required: ['summary']
-            }
-          }
-        }
+        { type: 'function', function: { name: 'create_directory', parameters: { type: 'object', properties: { path: { type: 'string' }}, required: ['path']}}},
+        { type: 'function', function: { name: 'create_file', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' }}, required: ['path', 'content']}}},
+        { type: 'function', function: { name: 'write_to_file', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' }}, required: ['path', 'content']}}},
+        { type: 'function', function: { name: 'execute_command', parameters: { type: 'object', properties: { command: { type: 'string' }}, required: ['command']}}},
+        { type: 'function', function: { name: 'complete_task', parameters: { type: 'object', properties: { summary: { type: 'string' }}, required: ['summary']}}}
       ];
 
-      addThought('📖 Membaca instruksi dari SKILL.md...', null);
-      
       const messages = [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
       ];
 
-      let currentFileSystem = {};
-      let iterationCount = 0;
-      const MAX_ITERATIONS = 10;
+      let fs = {};
+      let iter = 0;
 
-      while (iterationCount < MAX_ITERATIONS) {
-        iterationCount++;
-        addLog(`🔄 Iterasi ${iterationCount}...`, 'info');
+      while (iter < 10) {
+        iter++;
+        addLog(`🔄 Iter ${iter}`, 'info');
 
-        // ✅ PRUNE conversation history jika terlalu panjang
-        // Keep only: system message, user message, last 3 exchanges
         if (messages.length > 15) {
-          const systemMsg = messages[0];
-          const userMsg = messages[1];
-          const recentMessages = messages.slice(-10); // Last 10 messages
-          
+          const recent = messages.slice(-10);
           messages.length = 0;
-          messages.push(systemMsg);
-          messages.push(userMsg);
-          messages.push(...recentMessages);
-          
-          addLog(`🔄 Pruned conversation history (keeping recent context)`, 'info');
+          messages.push({ role: 'system', content: systemPrompt });
+          messages.push({ role: 'user', content: userPrompt });
+          messages.push(...recent);
         }
 
-        const response = await callBackendAPI(messages, tools);
-        const assistantMessage = response.choices[0].message;
+        const resp = await callMultiProviderAPI(messages, tools);
+        const msg = resp.choices[0].message;
 
-        if (assistantMessage.content) {
-          addThought(assistantMessage.content, `Step ${iterationCount}`);
-        }
+        if (msg.content) addThought(msg.content, `Step ${iter}`);
 
-        if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
-          addLog('✅ Agent selesai (no more actions)', 'success');
+        if (!msg.tool_calls || !msg.tool_calls.length) {
+          addLog('✅ Done', 'success');
           break;
         }
 
-        messages.push(assistantMessage);
+        messages.push(msg);
 
-        let allToolResults = [];
-        for (const toolCall of assistantMessage.tool_calls) {
-          const functionName = toolCall.function.name;
-          const functionArgs = JSON.parse(toolCall.function.arguments);
+        for (const tc of msg.tool_calls) {
+          const fn = tc.function.name;
+          const args = JSON.parse(tc.function.arguments);
 
-          addLog(`🔧 Tool: ${functionName}`, 'info');
-
-          const toolResult = await executeToolCall(functionName, functionArgs, currentFileSystem);
+          const result = await executeToolCall(fn, args, fs);
           
-          if (toolResult.filesystem) {
-            currentFileSystem = toolResult.filesystem;
-            setVirtualFileSystem(toolResult.filesystem);
+          if (result.filesystem) {
+            fs = result.filesystem;
+            setVirtualFileSystem(fs);
           }
 
           messages.push({
             role: 'tool',
-            tool_call_id: toolCall.id,
-            content: JSON.stringify(toolResult)
+            tool_call_id: tc.id,
+            content: JSON.stringify(result)
           });
 
-          allToolResults.push(toolResult);
-
-          if (functionName === 'complete_task') {
-            addLog('🎉 Task ditandai selesai oleh agent!', 'success');
-            addThought(`Task Summary: ${toolResult.summary}`, 'COMPLETED');
-            iterationCount = MAX_ITERATIONS;
+          if (fn === 'complete_task') {
+            addThought(`Done: ${result.summary}`, 'COMPLETE');
+            iter = 10;
             break;
           }
         }
@@ -627,19 +319,8 @@ Anda memiliki tools untuk:
         await sleep(1500);
       }
 
-      if (iterationCount >= MAX_ITERATIONS) {
-        addLog('⚠️ Reached max iterations', 'warning');
-      }
-
-      const fileCount = Object.keys(currentFileSystem).length;
-      if (fileCount > 0) {
-        addLog(`📦 Total ${fileCount} file/direktori dibuat`, 'success');
-        addThought(`File System:\n${JSON.stringify(currentFileSystem, null, 2)}`, 'File System');
-      }
-
     } catch (error) {
-      addLog('❌ Error: ' + error.message, 'error');
-      addThought('Error: ' + error.message, 'ERROR');
+      addLog(`❌ ${error.message}`, 'error');
     } finally {
       setIsRunning(false);
     }
@@ -652,44 +333,120 @@ Anda memiliki tools untuk:
     setCommandOutputs([]);
   };
 
-  const resetApiKey = () => {
-    setApiKey('');
-    setIsApiKeySet(false);
-    localStorage.removeItem('groq_api_key');
-    clearLogs();
-  };
+  // Settings Modal Component
+  const SettingsModal = () => (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div className="bg-slate-800 rounded-2xl p-8 max-w-2xl w-full max-h-[90vh] overflow-y-auto border border-purple-500/30">
+        <div className="flex justify-between items-center mb-6">
+          <h2 className="text-2xl font-bold text-white">⚙️ API Keys Settings</h2>
+          <button onClick={() => setShowSettings(false)} className="text-gray-400 hover:text-white text-2xl">×</button>
+        </div>
+        
+        <div className="space-y-6">
+          {/* Groq */}
+          <div>
+            <label className="block text-purple-200 text-sm font-semibold mb-2">
+              Groq API Key
+            </label>
+            <input
+              type="password"
+              value={apiKeys.groq}
+              onChange={(e) => setApiKeys({...apiKeys, groq: e.target.value})}
+              placeholder="gsk_..."
+              className="w-full px-4 py-3 bg-white/10 border border-white/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
+            />
+            <p className="text-xs text-gray-400 mt-1">Get: console.groq.com/keys</p>
+          </div>
+          
+          {/* Gemini */}
+          <div>
+            <label className="block text-green-200 text-sm font-bold mb-2">
+              🔥 Gemini API Key (Recommended!)
+            </label>
+            <input
+              type="password"
+              value={apiKeys.gemini}
+              onChange={(e) => setApiKeys({...apiKeys, gemini: e.target.value})}
+              placeholder="AIza..."
+              className="w-full px-4 py-3 bg-white/10 border-2 border-green-500/50 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-green-500"
+            />
+            <p className="text-xs text-green-300 mt-1">✨ 1,500 requests/day FREE • Get: aistudio.google.com/apikey</p>
+          </div>
+          
+          {/* OpenRouter */}
+          <div>
+            <label className="block text-purple-200 text-sm font-semibold mb-2">
+              OpenRouter API Key (Optional)
+            </label>
+            <input
+              type="password"
+              value={apiKeys.openrouter}
+              onChange={(e) => setApiKeys({...apiKeys, openrouter: e.target.value})}
+              placeholder="sk-or-..."
+              className="w-full px-4 py-3 bg-white/10 border border-white/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
+            />
+            <p className="text-xs text-gray-400 mt-1">Get: openrouter.ai/keys</p>
+          </div>
+          
+          {/* Together */}
+          <div>
+            <label className="block text-purple-200 text-sm font-semibold mb-2">
+              Together API Key (Optional)
+            </label>
+            <input
+              type="password"
+              value={apiKeys.together}
+              onChange={(e) => setApiKeys({...apiKeys, together: e.target.value})}
+              placeholder="..."
+              className="w-full px-4 py-3 bg-white/10 border border-white/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
+            />
+            <p className="text-xs text-gray-400 mt-1">Get: together.ai</p>
+          </div>
+        </div>
+        
+        <div className="flex gap-3 mt-8">
+          <button onClick={handleSaveApiKeys} className="flex-1 bg-gradient-to-r from-purple-500 to-pink-500 text-white py-3 rounded-lg font-semibold hover:from-purple-600 hover:to-pink-600">
+            💾 Save
+          </button>
+          <button onClick={() => setShowSettings(false)} className="px-6 bg-gray-600 hover:bg-gray-700 text-white py-3 rounded-lg font-semibold">
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   if (!isApiKeySet) {
     return (
       <>
-        <Head><title>Groq Agent - Executor</title></Head>
+        <Head><title>Multi-Provider Agent</title></Head>
         <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-8 flex items-center justify-center">
           <div className="max-w-md w-full bg-white/10 backdrop-blur-lg rounded-2xl p-8 shadow-2xl border border-white/20">
             <div className="flex justify-center mb-6">
               <div className="w-16 h-16 bg-purple-500 rounded-full flex items-center justify-center text-4xl">🤖</div>
             </div>
-            <h1 className="text-3xl font-bold text-white text-center mb-2">Groq Agent</h1>
-            <p className="text-purple-200 text-center mb-8">Executor Edition</p>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="gsk_..."
-              className="w-full px-4 py-3 bg-white/10 border border-white/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 mb-4"
-              onKeyPress={(e) => e.key === 'Enter' && handleApiKeySubmit()}
-            />
-            <button onClick={handleApiKeySubmit} disabled={!apiKey.trim()} className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white py-3 rounded-lg font-semibold hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50">
-              Mulai
+            <h1 className="text-3xl font-bold text-white text-center mb-2">Multi-Provider Agent</h1>
+            <p className="text-purple-200 text-center mb-8">Setup API keys untuk mulai</p>
+            
+            <button onClick={() => setShowSettings(true)} className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white py-4 rounded-lg font-semibold hover:from-purple-600 hover:to-pink-600 text-lg">
+              ⚙️ Setup API Keys
             </button>
+            
+            <div className="mt-6 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
+              <p className="text-green-200 text-sm text-center">
+                💡 Tip: Gunakan <strong>Gemini</strong> untuk 1,500 requests/day gratis!
+              </p>
+            </div>
           </div>
         </div>
+        {showSettings && <SettingsModal />}
       </>
     );
   }
 
   return (
     <>
-      <Head><title>Groq Agent - Executor</title></Head>
+      <Head><title>Multi-Provider Agent</title></Head>
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-6">
         <div className="max-w-7xl mx-auto">
           <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-6 border border-white/20">
@@ -697,14 +454,14 @@ Anda memiliki tools untuk:
               <div className="flex items-center gap-3">
                 <div className="text-4xl">🤖</div>
                 <div>
-                  <h1 className="text-2xl font-bold text-white">Groq Agent Executor</h1>
+                  <h1 className="text-2xl font-bold text-white">Multi-Provider Agent</h1>
                   <p className="text-purple-200 text-sm">
-                    Llama 3.3 70B • Mode: {executionMode === 'backend' ? '🔧 Backend' : '📡 Direct'}
+                    Active: {activeProviders.join(', ')} {currentProvider && `• Using: ${currentProvider}`}
                   </p>
                 </div>
               </div>
-              <button onClick={resetApiKey} className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-lg">
-                Reset
+              <button onClick={() => setShowSettings(true)} className="px-4 py-2 bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 rounded-lg flex items-center gap-2">
+                ⚙️ Settings
               </button>
             </div>
           </div>
@@ -732,18 +489,18 @@ Anda memiliki tools untuk:
               )}
 
               <div className="mb-4">
-                <label className="block text-purple-200 text-sm mb-2">Instruksi Tambahan (Opsional)</label>
+                <label className="block text-purple-200 text-sm mb-2">Instruksi</label>
                 <textarea
                   value={instruction}
                   onChange={(e) => setInstruction(e.target.value)}
-                  placeholder="Instruksi tambahan atau biarkan kosong untuk ikuti SKILL.md..."
+                  placeholder="Tulis instruksi..."
                   className="w-full px-4 py-3 bg-white/10 border border-white/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 h-32 resize-none"
                 />
               </div>
 
               <div className="flex gap-2">
                 <button onClick={executeAgentTask} disabled={isRunning || (useSkillMode && !skillFile)} className="flex-1 bg-gradient-to-r from-purple-500 to-pink-500 text-white py-3 rounded-lg font-semibold hover:from-purple-600 hover:to-pink-600 disabled:opacity-50">
-                  {isRunning ? '⚙️ Executing...' : '▶️ Jalankan'}
+                  {isRunning ? '⚙️ Running...' : '▶️ Run'}
                 </button>
                 <button onClick={clearLogs} className="px-4 py-3 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-lg">Clear</button>
               </div>
@@ -752,7 +509,7 @@ Anda memiliki tools untuk:
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
               <h2 className="text-xl font-bold text-white mb-4">📋 Execution Logs</h2>
               <div className="bg-black/30 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm">
-                {logs.length === 0 ? <p className="text-gray-400 text-center mt-10">Waiting for execution...</p> : logs.map((log, idx) => (
+                {logs.length === 0 ? <p className="text-gray-400 text-center mt-10">Waiting...</p> : logs.map((log, idx) => (
                   <div key={idx} className={'mb-2 ' + (log.type === 'error' ? 'text-red-400' : log.type === 'success' ? 'text-green-400' : log.type === 'warning' ? 'text-yellow-400' : 'text-blue-300')}>
                     <span className="text-gray-500">[{log.timestamp}]</span> {log.message}
                   </div>
@@ -764,15 +521,15 @@ Anda memiliki tools untuk:
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
-              <h2 className="text-xl font-bold text-white mb-4">🧠 Agent Reasoning</h2>
+              <h2 className="text-xl font-bold text-white mb-4">🧠 Reasoning</h2>
               <div className="bg-black/30 rounded-lg p-4 max-h-96 overflow-y-auto">
-                {agentThoughts.length === 0 ? <p className="text-gray-400 text-center">Waiting...</p> : agentThoughts.map((thought, idx) => (
-                  <div key={idx} className="mb-4 p-4 bg-white/5 rounded-lg border border-purple-500/30">
+                {agentThoughts.length === 0 ? <p className="text-gray-400 text-center">Waiting...</p> : agentThoughts.map((t, i) => (
+                  <div key={i} className="mb-4 p-4 bg-white/5 rounded-lg border border-purple-500/30">
                     <div className="flex items-center gap-2 mb-2">
-                      <span className="text-purple-400 font-semibold">[{thought.timestamp}]</span>
-                      {thought.action && <span className="px-2 py-1 bg-purple-500/30 text-purple-200 text-xs rounded">{thought.action}</span>}
+                      <span className="text-purple-400 text-xs">[{t.timestamp}]</span>
+                      {t.action && <span className="px-2 py-1 bg-purple-500/30 text-purple-200 text-xs rounded">{t.action}</span>}
                     </div>
-                    <p className="text-white whitespace-pre-wrap text-sm">{thought.thought}</p>
+                    <p className="text-white text-sm">{t.thought}</p>
                   </div>
                 ))}
               </div>
@@ -781,9 +538,7 @@ Anda memiliki tools untuk:
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
               <h2 className="text-xl font-bold text-white mb-4">⚙️ Command Outputs</h2>
               <div className="bg-black/30 rounded-lg p-4 max-h-96 overflow-y-auto">
-                {commandOutputs.length === 0 ? (
-                  <p className="text-gray-400 text-center">No commands executed...</p>
-                ) : (
+                {commandOutputs.length === 0 ? <p className="text-gray-400 text-center">No commands...</p> : (
                   <div className="space-y-3">
                     {commandOutputs.map((item, idx) => (
                       <div key={idx} className="p-3 bg-white/5 rounded border border-cyan-500/30">
@@ -802,21 +557,19 @@ Anda memiliki tools untuk:
             </div>
 
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
-              <h2 className="text-xl font-bold text-white mb-4">📦 Virtual File System</h2>
+              <h2 className="text-xl font-bold text-white mb-4">📦 File System</h2>
               <div className="bg-black/30 rounded-lg p-4 max-h-96 overflow-y-auto">
-                {Object.keys(virtualFileSystem).length === 0 ? (
-                  <p className="text-gray-400 text-center">No files created yet...</p>
-                ) : (
+                {Object.keys(virtualFileSystem).length === 0 ? <p className="text-gray-400 text-center">No files...</p> : (
                   <div className="space-y-2">
                     {Object.entries(virtualFileSystem).map(([path, data], idx) => (
                       <div key={idx} className="p-3 bg-white/5 rounded border border-green-500/30">
                         <div className="flex items-center gap-2 mb-1">
                           <span className="text-xl">{data.type === 'directory' ? '📁' : '📄'}</span>
-                          <span className="text-green-400 font-mono text-sm">{path}</span>
+                          <span className="text-green-400 font-mono text-xs">{path}</span>
                         </div>
                         {data.content && (
                           <div className="ml-7 text-xs text-gray-400 mt-1 font-mono overflow-x-auto">
-                            {data.content.substring(0, 100)}{data.content.length > 100 ? '...' : ''}
+                            {data.content.substring(0, 80)}...
                           </div>
                         )}
                       </div>
@@ -828,6 +581,8 @@ Anda memiliki tools untuk:
           </div>
         </div>
       </div>
+      
+      {showSettings && <SettingsModal />}
     </>
   );
 }
