@@ -229,7 +229,7 @@ export default function Home() {
       addLog(`❌ Error: ${error.message}`, 'error');
       addThought('Error occurred during execution', error.message);
     } finally {
-      setIsRunning = false;
+      setIsRunning(false);  // ← FIXED: Pakai kurung!
     }
   };
 
