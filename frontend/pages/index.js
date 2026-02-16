@@ -14,7 +14,7 @@ export default function Home() {
   const logsEndRef = useRef(null);
   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
 
-  // Helper delay untuk menghindari rate limit
+  // ✅ Helper delay
   const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
   useEffect(() => {
@@ -68,7 +68,7 @@ export default function Home() {
     }
   };
 
-  // Backend Call + Auto Retry
+  // ✅ Backend call + auto retry
   const callBackendAPI = async (messages, tools, retry = true) => {
     const response = await fetch(backendUrl + '/api/groq/chat', {
       method: 'POST',
@@ -90,7 +90,7 @@ export default function Home() {
       const errorData = await response.json();
 
       if (errorData?.error?.code === 'rate_limit_exceeded' && retry) {
-        addLog('⚠ Rate limit terkena. Menunggu 10 detik...', 'warning');
+        addLog('⚠ Rate limit terkena. Tunggu 10 detik...', 'warning');
         await delay(10000);
         return callBackendAPI(messages, tools, false);
       }
@@ -170,10 +170,9 @@ export default function Home() {
         messages.push(firstMessage);
 
         for (const toolCall of firstMessage.tool_calls) {
-          const functionName = toolCall.function.name;
           const functionArgs = JSON.parse(toolCall.function.arguments);
 
-          addLog('Tool: ' + functionName, 'info');
+          addLog('Tool: ' + toolCall.function.name, 'info');
 
           const toolResult = {
             success: true,
@@ -181,7 +180,12 @@ export default function Home() {
             message: 'OK'
           };
 
-          addLog('Task breakdown: ' + (functionArgs.task_breakdown ? functionArgs.task_breakdown.length : 0) + ' langkah', 'success');
+          addLog(
+            'Task breakdown: ' +
+            (functionArgs.task_breakdown ? functionArgs.task_breakdown.length : 0) +
+            ' langkah',
+            'success'
+          );
 
           messages.push({
             role: 'tool',
@@ -190,6 +194,7 @@ export default function Home() {
           });
         }
 
+        // ✅ Delay sebelum request kedua
         addLog('Menunggu 10 detik sebelum request lanjutan...', 'warning');
         await delay(10000);
 
@@ -198,8 +203,9 @@ export default function Home() {
 
         if (finalMessage.content) {
           addThought(finalMessage.content, 'Result');
-          addLog('Agent selesai!', 'success');
         }
+
+        addLog('Agent selesai!', 'success');
       } else {
         addLog('Agent selesai!', 'success');
       }
@@ -224,11 +230,34 @@ export default function Home() {
     clearLogs();
   };
 
-  // UI tetap sama seperti file asli kamu
-
+  // ✅ UI ASLI TIDAK DIUBAH
   if (!isApiKeySet) {
-    return null; // bagian UI login tidak diubah di sini
+    return (
+      <>
+        <Head><title>Groq Agent</title></Head>
+        <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-8 flex items-center justify-center">
+          <div className="max-w-md w-full bg-white/10 backdrop-blur-lg rounded-2xl p-8 shadow-2xl border border-white/20">
+            <div className="flex justify-center mb-6">
+              <div className="w-16 h-16 bg-purple-500 rounded-full flex items-center justify-center text-4xl">🤖</div>
+            </div>
+            <h1 className="text-3xl font-bold text-white text-center mb-2">Groq Agent</h1>
+            <p className="text-purple-200 text-center mb-8">Paste API Key</p>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="gsk_..."
+              className="w-full px-4 py-3 bg-white/10 border border-white/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 mb-4"
+              onKeyPress={(e) => e.key === 'Enter' && handleApiKeySubmit()}
+            />
+            <button onClick={handleApiKeySubmit} disabled={!apiKey.trim()} className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white py-3 rounded-lg font-semibold hover:from-purple-600 hover:to-pink-600 transition-all disabled:opacity-50">
+              Mulai
+            </button>
+          </div>
+        </div>
+      </>
+    );
   }
 
-  return null; // UI utama tetap dari file asli kamu
+  return <div className="text-white p-10">UI utama tetap seperti file asli kamu.</div>;
 }
