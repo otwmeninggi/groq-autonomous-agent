@@ -322,6 +322,17 @@ export default function Home() {
   const callBackendAPI = async (messages, tools, retryAttempt = 0) => {
     const MAX_RETRIES = 3;
     
+    // ✅ Estimate token usage (rough estimation)
+    const estimateTokens = (msgs) => {
+      const text = JSON.stringify(msgs);
+      return Math.ceil(text.length / 4); // Rough: 1 token ≈ 4 chars
+    };
+    
+    const estimatedTokens = estimateTokens(messages);
+    if (estimatedTokens > 10000) {
+      addLog(`⚠️ High token usage: ~${estimatedTokens} tokens`, 'warning');
+    }
+    
     try {
       const response = await fetch(backendUrl + '/api/groq/chat', {
         method: 'POST',
@@ -342,6 +353,10 @@ export default function Home() {
       if (!response.ok) {
         const errorData = await response.json();
         
+        // Log detailed error untuk debugging
+        console.error('Backend Error Details:', errorData);
+        addLog(`🔍 Debug: ${JSON.stringify(errorData)}`, 'warning');
+        
         if (errorData.error?.code === 'rate_limit_exceeded') {
           if (retryAttempt < MAX_RETRIES) {
             const waitTime = extractWaitTime(errorData.error.message);
@@ -356,13 +371,22 @@ export default function Home() {
           }
         }
         
-        throw new Error(errorData.error?.message || 'Backend Error');
+        // Throw dengan pesan error yang lebih detail
+        const errorMsg = errorData.error?.message || errorData.error || JSON.stringify(errorData);
+        throw new Error(`Backend Error: ${errorMsg}`);
       }
 
       return await response.json();
     } catch (error) {
-      if (error.message.includes('fetch')) {
-        throw new Error('Koneksi gagal. Cek internet atau backend URL.');
+      // Network error - retry jika masih ada kesempatan
+      if (error.message.includes('fetch') || error.message.includes('network')) {
+        if (retryAttempt < MAX_RETRIES) {
+          const retryDelay = (retryAttempt + 1) * 3000; // 3s, 6s, 9s
+          addLog(`🔌 Network error. Retry ${retryAttempt + 1}/${MAX_RETRIES} dalam ${retryDelay/1000}s...`, 'warning');
+          await sleep(retryDelay);
+          return callBackendAPI(messages, tools, retryAttempt + 1);
+        }
+        throw new Error('Koneksi gagal setelah ' + MAX_RETRIES + ' retry. Cek internet atau backend URL.');
       }
       throw error;
     }
@@ -540,6 +564,21 @@ Anda memiliki tools untuk:
       while (iterationCount < MAX_ITERATIONS) {
         iterationCount++;
         addLog(`🔄 Iterasi ${iterationCount}...`, 'info');
+
+        // ✅ PRUNE conversation history jika terlalu panjang
+        // Keep only: system message, user message, last 3 exchanges
+        if (messages.length > 15) {
+          const systemMsg = messages[0];
+          const userMsg = messages[1];
+          const recentMessages = messages.slice(-10); // Last 10 messages
+          
+          messages.length = 0;
+          messages.push(systemMsg);
+          messages.push(userMsg);
+          messages.push(...recentMessages);
+          
+          addLog(`🔄 Pruned conversation history (keeping recent context)`, 'info');
+        }
 
         const response = await callBackendAPI(messages, tools);
         const assistantMessage = response.choices[0].message;
