@@ -14,6 +14,10 @@ export default function Home() {
   const logsEndRef = useRef(null);
   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
 
+  // ✅ PERBAIKAN 1: Tambahkan retry state
+  const [retryCount, setRetryCount] = useState(0);
+  const MAX_RETRIES = 3;
+
   useEffect(() => {
     const savedKey = localStorage.getItem('groq_api_key');
     if (savedKey) {
@@ -65,29 +69,66 @@ export default function Home() {
     }
   };
 
-  const callBackendAPI = async (messages, tools) => {
-    const response = await fetch(backendUrl + '/api/groq/chat', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': apiKey,
-      },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: messages,
-        temperature: 0.7,
-        max_tokens: 2000,
-        tools: tools || undefined,
-        tool_choice: tools ? 'auto' : undefined
-      })
-    });
+  // ✅ PERBAIKAN 2: Tambahkan fungsi delay untuk retry
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.error || 'Backend Error');
+  // ✅ PERBAIKAN 3: Fungsi untuk extract wait time dari error message
+  const extractWaitTime = (errorMessage) => {
+    const match = errorMessage.match(/try again in ([\d.]+)s/);
+    if (match) {
+      return parseFloat(match[1]) * 1000; // Convert ke milliseconds
     }
+    return 6000; // Default 6 detik jika tidak ketemu
+  };
 
-    return await response.json();
+  // ✅ PERBAIKAN 4: Tambahkan retry logic dengan exponential backoff
+  const callBackendAPI = async (messages, tools, retryAttempt = 0) => {
+    try {
+      const response = await fetch(backendUrl + '/api/groq/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey,
+        },
+        body: JSON.stringify({
+          model: 'llama-3.3-70b-versatile',
+          messages: messages,
+          temperature: 0.7,
+          max_tokens: 1500, // ✅ PERBAIKAN 5: Kurangi max_tokens dari 2000 ke 1500
+          tools: tools || undefined,
+          tool_choice: tools ? 'auto' : undefined
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        
+        // ✅ PERBAIKAN 6: Handle rate limit error khusus
+        if (errorData.error?.code === 'rate_limit_exceeded') {
+          if (retryAttempt < MAX_RETRIES) {
+            const waitTime = extractWaitTime(errorData.error.message);
+            const retryDelay = Math.max(waitTime, (retryAttempt + 1) * 2000); // Minimum 2 detik per retry
+            
+            addLog(`⏳ Rate limit tercapai. Retry ${retryAttempt + 1}/${MAX_RETRIES} dalam ${Math.ceil(retryDelay / 1000)} detik...`, 'warning');
+            
+            await sleep(retryDelay);
+            return callBackendAPI(messages, tools, retryAttempt + 1);
+          } else {
+            throw new Error('Rate limit exceeded setelah ' + MAX_RETRIES + ' retry. Tunggu beberapa menit dan coba lagi.');
+          }
+        }
+        
+        throw new Error(errorData.error?.message || 'Backend Error');
+      }
+
+      return await response.json();
+    } catch (error) {
+      // ✅ PERBAIKAN 7: Handle network errors
+      if (error.message.includes('fetch')) {
+        throw new Error('Koneksi gagal. Cek internet atau backend URL.');
+      }
+      throw error;
+    }
   };
 
   const executeAgentTask = async () => {
@@ -104,6 +145,7 @@ export default function Home() {
     }
 
     setIsRunning(true);
+    setRetryCount(0); // Reset retry count
     addLog('Agent mulai bekerja...', 'info');
     
     try {
@@ -111,25 +153,36 @@ export default function Home() {
       let userPrompt = '';
 
       if (useSkillMode && skillFile) {
-        systemPrompt = 'Anda adalah autonomous agent yang mengikuti instruksi dari SKILL.md.';
-        userPrompt = 'SKILL.md:\\n' + skillFile.content + '\\n\\nInstruksi: ' + (instruction || 'Ikuti SKILL.md');
+        // ✅ PERBAIKAN 8: Batasi panjang SKILL.md untuk mengurangi token usage
+        const maxSkillLength = 3000; // Batasi karakter
+        const truncatedContent = skillFile.content.length > maxSkillLength 
+          ? skillFile.content.substring(0, maxSkillLength) + '...[dipotong]'
+          : skillFile.content;
+          
+        systemPrompt = 'Anda adalah autonomous agent yang mengikuti instruksi dari SKILL.md. Jawab singkat dan padat.';
+        userPrompt = 'SKILL.md:\n' + truncatedContent + '\n\nInstruksi: ' + (instruction || 'Ikuti SKILL.md');
         addLog('Mode: Skill-based', 'info');
       } else {
-        systemPrompt = 'Anda adalah autonomous agent yang pintar.';
+        systemPrompt = 'Anda adalah autonomous agent yang pintar. Berikan jawaban singkat, jelas, dan langsung ke inti.';
         userPrompt = instruction;
         addLog('Mode: Autonomous', 'info');
       }
 
+      // ✅ PERBAIKAN 9: Sederhanakan tool definition untuk mengurangi tokens
       const tools = [
         {
           type: 'function',
           function: {
             name: 'analyze_task',
-            description: 'Analisis task',
+            description: 'Analisis task jadi langkah-langkah',
             parameters: {
               type: 'object',
               properties: {
-                task_breakdown: { type: 'array', items: { type: 'string' } }
+                task_breakdown: { 
+                  type: 'array', 
+                  items: { type: 'string' },
+                  description: 'List langkah (max 5)'
+                }
               },
               required: ['task_breakdown']
             }
@@ -160,13 +213,18 @@ export default function Home() {
 
           addLog('Tool: ' + functionName, 'info');
 
+          // ✅ PERBAIKAN 10: Batasi task breakdown max 5 items
+          const taskBreakdown = functionArgs.task_breakdown 
+            ? functionArgs.task_breakdown.slice(0, 5)
+            : [];
+
           const toolResult = {
             success: true,
-            breakdown: functionArgs.task_breakdown || [],
+            breakdown: taskBreakdown,
             message: 'OK'
           };
 
-          addLog('Task breakdown: ' + (functionArgs.task_breakdown ? functionArgs.task_breakdown.length : 0) + ' langkah', 'success');
+          addLog('Task breakdown: ' + taskBreakdown.length + ' langkah', 'success');
 
           messages.push({
             role: 'tool',
@@ -175,6 +233,9 @@ export default function Home() {
           });
         }
 
+        // ✅ PERBAIKAN 11: Tambahkan delay sebelum request kedua
+        await sleep(1000); // Wait 1 detik
+        
         const secondResponse = await callBackendAPI(messages, null);
         const finalMessage = secondResponse.choices[0].message;
 
@@ -245,7 +306,7 @@ export default function Home() {
                 <div className="text-4xl">🤖</div>
                 <div>
                   <h1 className="text-2xl font-bold text-white">Groq Agent</h1>
-                  <p className="text-purple-200 text-sm">Llama 3.3 70B</p>
+                  <p className="text-purple-200 text-sm">Llama 3.3 70B + Auto Retry</p>
                 </div>
               </div>
               <button onClick={resetApiKey} className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-lg">
@@ -271,7 +332,7 @@ export default function Home() {
                 <div className="mb-4">
                   <input type="file" accept=".md,.txt" onChange={handleFileUpload} className="hidden" id="file-upload" />
                   <label htmlFor="file-upload" className="flex items-center justify-center gap-2 px-4 py-3 bg-white/10 border-2 border-dashed border-white/30 rounded-lg text-purple-200 hover:bg-white/20 cursor-pointer">
-                    📁 {skillFile ? skillFile.name : 'Upload SKILL.md'}
+                    📄 {skillFile ? skillFile.name : 'Upload SKILL.md'}
                   </label>
                 </div>
               )}
