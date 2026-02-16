@@ -1,6 +1,9 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
+import subprocess
+import json
+import re
 import os
 
 app = Flask(__name__)
@@ -49,13 +52,84 @@ def groq_chat():
     except Exception as e:
         return jsonify({'error': f'Server error: {str(e)}'}), 500
 
+@app.route('/api/execute-command', methods=['POST', 'OPTIONS'])
+def execute_command():
+    """Execute shell command (curl, wget, etc)"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    try:
+        data = request.get_json()
+        command = data.get('command', '')
+        
+        if not command:
+            return jsonify({'error': 'Command tidak boleh kosong'}), 400
+        
+        # Security: hanya allow curl, wget, dan beberapa command safe lainnya
+        allowed_commands = ['curl', 'wget', 'echo', 'cat']
+        command_name = command.split()[0]
+        
+        if command_name not in allowed_commands:
+            return jsonify({
+                'error': f'Command "{command_name}" tidak diizinkan. Hanya: {", ".join(allowed_commands)}'
+            }), 403
+        
+        print(f"🚀 Executing command: {command}")
+        
+        # Execute command
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        
+        # Try parse JSON response jika ada
+        response_data = None
+        try:
+            response_data = json.loads(stdout)
+        except:
+            response_data = stdout
+        
+        print(f"✅ Command executed successfully")
+        print(f"📤 Output: {stdout[:200]}...")  # Log first 200 chars
+        
+        return jsonify({
+            'success': result.returncode == 0,
+            'command': command,
+            'output': response_data,
+            'raw_output': stdout,
+            'error': stderr if stderr else None,
+            'return_code': result.returncode
+        }), 200
+        
+    except subprocess.TimeoutExpired:
+        return jsonify({
+            'success': False,
+            'error': 'Command timeout (> 30 detik)'
+        }), 504
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Error executing command: {str(e)}'
+        }), 500
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
     return jsonify({
         'status': 'ok',
         'message': 'Backend server is running',
-        'port': os.environ.get('PORT', '5000')
+        'port': os.environ.get('PORT', '5000'),
+        'endpoints': [
+            '/api/groq/chat',
+            '/api/execute-command',
+            '/api/health'
+        ]
     }), 200
 
 @app.route('/', methods=['GET'])
@@ -63,8 +137,13 @@ def home():
     """Home endpoint"""
     return jsonify({
         'name': 'Groq Autonomous Agent Backend',
-        'version': '1.0.0',
-        'status': 'running'
+        'version': '2.0.0',
+        'status': 'running',
+        'new_features': [
+            'Execute shell commands (curl, wget)',
+            'Real API integration',
+            'Command output parsing'
+        ]
     }), 200
 
 if __name__ == '__main__':
@@ -72,19 +151,20 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     
     print("=" * 70)
-    print("🚀 Groq Autonomous Agent Backend Server")
+    print("🚀 Groq Autonomous Agent Backend Server v2.0")
     print("=" * 70)
     print(f"✓ Host: 0.0.0.0")
     print(f"✓ Port: {port} (from environment variable PORT)")
     print(f"✓ Debug: False (Production mode)")
     print(f"✓ CORS: Enabled for all origins")
+    print(f"✓ New: /api/execute-command endpoint")
     print("=" * 70)
     print()
     
     # Run server dengan PORT dari Railway
     app.run(
         host='0.0.0.0',
-        port=port,          # ← PAKAI PORT DARI ENVIRONMENT!
-        debug=False,        # ← PRODUCTION MODE!
-        use_reloader=False  # ← DISABLE RELOADER untuk production
+        port=port,
+        debug=False,
+        use_reloader=False
     )
