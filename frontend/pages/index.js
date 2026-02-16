@@ -10,6 +10,7 @@ export default function Home() {
   const [isRunning, setIsRunning] = useState(false);
   const [logs, setLogs] = useState([]);
   const [agentThoughts, setAgentThoughts] = useState([]);
+  const [commandOutputs, setCommandOutputs] = useState([]); // Tambah state untuk outputs
 
   const logsEndRef = useRef(null);
   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
@@ -150,11 +151,41 @@ export default function Home() {
         };
 
       case 'execute_command':
-        addLog(`⚙️ Execute: ${args.command}`, 'info');
+        // Generate random agent name jika ada placeholder
+        let processedCommand = args.command;
+        if (processedCommand.includes('YourAgentName')) {
+          const randomName = 'Agent_' + Math.random().toString(36).substring(2, 10);
+          processedCommand = processedCommand.replace(/YourAgentName/g, randomName);
+          addLog(`🎲 Random name generated: ${randomName}`, 'success');
+        }
+        
+        addLog(`⚙️ Execute: ${processedCommand}`, 'info');
+        
+        // Simulasi output yang lebih realistis
+        const mockOutput = {
+          status: 'success',
+          message: 'Command executed successfully',
+          command: processedCommand,
+          timestamp: new Date().toISOString(),
+          response: processedCommand.includes('register') 
+            ? '{"success": true, "agent_id": "' + Math.random().toString(36).substring(2, 12) + '", "message": "Agent registered successfully"}'
+            : 'Command completed'
+        };
+        
+        addLog(`✅ Output: ${mockOutput.response}`, 'success');
+        
+        // Save ke commandOutputs state
+        setCommandOutputs(prev => [...prev, {
+          timestamp: new Date().toLocaleTimeString('id-ID'),
+          command: processedCommand,
+          output: mockOutput.response
+        }]);
+        
         return {
           success: true,
-          output: `Command '${args.command}' executed successfully (simulated)`,
-          message: 'Command berhasil dijalankan'
+          output: JSON.stringify(mockOutput, null, 2),
+          message: 'Command berhasil dijalankan',
+          command: processedCommand
         };
 
       case 'register_api_key':
@@ -485,6 +516,7 @@ Anda memiliki tools untuk:
     setLogs([]);
     setAgentThoughts([]);
     setVirtualFileSystem({});
+    setCommandOutputs([]);
   };
 
   const resetApiKey = () => {
@@ -595,7 +627,7 @@ Anda memiliki tools untuk:
             </div>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
             <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
               <h2 className="text-xl font-bold text-white mb-4">🧠 Agent Reasoning</h2>
               <div className="bg-black/30 rounded-lg p-4 max-h-96 overflow-y-auto">
@@ -608,6 +640,29 @@ Anda memiliki tools untuk:
                     <p className="text-white whitespace-pre-wrap text-sm">{thought.thought}</p>
                   </div>
                 ))}
+              </div>
+            </div>
+
+            <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
+              <h2 className="text-xl font-bold text-white mb-4">⚙️ Command Outputs</h2>
+              <div className="bg-black/30 rounded-lg p-4 max-h-96 overflow-y-auto">
+                {commandOutputs.length === 0 ? (
+                  <p className="text-gray-400 text-center">No commands executed...</p>
+                ) : (
+                  <div className="space-y-3">
+                    {commandOutputs.map((item, idx) => (
+                      <div key={idx} className="p-3 bg-white/5 rounded border border-cyan-500/30">
+                        <div className="text-cyan-400 text-xs mb-2">[{item.timestamp}]</div>
+                        <div className="text-gray-300 text-xs font-mono mb-2 bg-black/30 p-2 rounded overflow-x-auto">
+                          $ {item.command}
+                        </div>
+                        <div className="text-green-400 text-xs font-mono bg-black/30 p-2 rounded overflow-x-auto">
+                          {item.output}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
 
