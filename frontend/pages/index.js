@@ -10,12 +10,12 @@ export default function Home() {
   const [isRunning, setIsRunning] = useState(false);
   const [logs, setLogs] = useState([]);
   const [agentThoughts, setAgentThoughts] = useState([]);
-  const [commandOutputs, setCommandOutputs] = useState([]); // Tambah state untuk outputs
+  const [commandOutputs, setCommandOutputs] = useState([]);
+  const [executionMode, setExecutionMode] = useState('backend'); // 'backend' or 'direct'
 
   const logsEndRef = useRef(null);
   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
 
-  // State untuk menyimpan file system virtual
   const [virtualFileSystem, setVirtualFileSystem] = useState({});
 
   useEffect(() => {
@@ -77,6 +77,80 @@ export default function Home() {
       return parseFloat(match[1]) * 1000;
     }
     return 6000;
+  };
+
+  // ✅ Parse curl command menjadi fetch options
+  const parseCurlCommand = (curlCommand) => {
+    const urlMatch = curlCommand.match(/https?:\/\/[^\s]+/);
+    const url = urlMatch ? urlMatch[0] : null;
+    
+    const methodMatch = curlCommand.match(/-X\s+(\w+)/);
+    const method = methodMatch ? methodMatch[1] : 'GET';
+    
+    const headerMatches = [...curlCommand.matchAll(/-H\s+["']([^"']+)["']/g)];
+    const headers = {};
+    headerMatches.forEach(match => {
+      const [key, value] = match[1].split(':').map(s => s.trim());
+      headers[key] = value;
+    });
+    
+    const dataMatch = curlCommand.match(/-d\s+['"](.+)['"]/);
+    const body = dataMatch ? dataMatch[1] : null;
+    
+    return { url, method, headers, body };
+  };
+
+  // ✅ Execute curl via direct fetch (fallback jika backend ga ada endpoint)
+  const executeCurlDirect = async (curlCommand) => {
+    try {
+      const { url, method, headers, body } = parseCurlCommand(curlCommand);
+      
+      if (!url) {
+        throw new Error('Invalid curl command: URL not found');
+      }
+      
+      addLog(`📡 Direct fetch to: ${url}`, 'info');
+      
+      const fetchOptions = {
+        method,
+        headers,
+      };
+      
+      if (body && method !== 'GET') {
+        fetchOptions.body = body;
+      }
+      
+      const response = await fetch(url, fetchOptions);
+      const data = await response.json();
+      
+      return {
+        success: response.ok,
+        output: data,
+        raw_output: JSON.stringify(data, null, 2),
+        status: response.status
+      };
+    } catch (error) {
+      throw new Error(`Direct fetch failed: ${error.message}`);
+    }
+  };
+
+  // ✅ Execute curl via backend
+  const executeCurlBackend = async (curlCommand) => {
+    const executeResponse = await fetch(backendUrl + '/api/execute-command', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        command: curlCommand
+      })
+    });
+    
+    if (!executeResponse.ok) {
+      throw new Error(`Backend returned ${executeResponse.status}`);
+    }
+    
+    return await executeResponse.json();
   };
 
   // ✅ FUNGSI UNTUK EKSEKUSI TOOL (ASYNC)
@@ -156,64 +230,68 @@ export default function Home() {
         if (processedCommand.includes('YourAgentName')) {
           const randomName = 'Agent_' + Math.random().toString(36).substring(2, 10);
           processedCommand = processedCommand.replace(/YourAgentName/g, randomName);
-          addLog(`🎲 Random name generated: ${randomName}`, 'success');
+          addLog(`🎲 Random name: ${randomName}`, 'success');
         }
         
         addLog(`⚙️ Executing: ${processedCommand}`, 'info');
         
-        // Call backend untuk execute command secara real
+        let executeResult;
+        
+        // Try backend first, fallback to direct
         try {
-          const executeResponse = await fetch(backendUrl + '/api/execute-command', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              command: processedCommand
-            })
-          });
-          
-          const executeResult = await executeResponse.json();
-          
-          if (executeResult.success) {
-            // Parse output untuk display
-            let displayOutput = '';
-            if (typeof executeResult.output === 'object') {
-              displayOutput = JSON.stringify(executeResult.output, null, 2);
-            } else {
-              displayOutput = executeResult.output || executeResult.raw_output;
-            }
-            
-            addLog(`✅ Command executed successfully!`, 'success');
-            
-            // Save ke commandOutputs state
-            setCommandOutputs(prev => [...prev, {
-              timestamp: new Date().toLocaleTimeString('id-ID'),
-              command: processedCommand,
-              output: displayOutput
-            }]);
-            
-            return {
-              success: true,
-              output: displayOutput,
-              raw_output: executeResult.raw_output,
-              message: 'Command berhasil dijalankan',
-              command: processedCommand
-            };
+          if (executionMode === 'backend') {
+            addLog(`📡 Mode: Backend execution`, 'info');
+            executeResult = await executeCurlBackend(processedCommand);
           } else {
-            addLog(`❌ Command failed: ${executeResult.error}`, 'error');
+            addLog(`📡 Mode: Direct fetch`, 'info');
+            executeResult = await executeCurlDirect(processedCommand);
+          }
+        } catch (backendError) {
+          addLog(`⚠️ Backend failed: ${backendError.message}`, 'warning');
+          addLog(`🔄 Fallback to direct fetch...`, 'info');
+          
+          try {
+            executeResult = await executeCurlDirect(processedCommand);
+            setExecutionMode('direct'); // Switch to direct mode
+          } catch (directError) {
+            addLog(`❌ Direct fetch also failed: ${directError.message}`, 'error');
             return {
               success: false,
-              output: executeResult.error,
-              message: 'Command gagal dijalankan'
+              output: `Both backend and direct execution failed. Error: ${directError.message}`,
+              message: 'Execution failed'
             };
           }
-        } catch (fetchError) {
-          addLog(`❌ Failed to execute: ${fetchError.message}`, 'error');
+        }
+        
+        if (executeResult.success) {
+          let displayOutput = '';
+          if (typeof executeResult.output === 'object') {
+            displayOutput = JSON.stringify(executeResult.output, null, 2);
+          } else {
+            displayOutput = executeResult.output || executeResult.raw_output;
+          }
+          
+          addLog(`✅ Command executed successfully!`, 'success');
+          
+          setCommandOutputs(prev => [...prev, {
+            timestamp: new Date().toLocaleTimeString('id-ID'),
+            command: processedCommand,
+            output: displayOutput
+          }]);
+          
+          return {
+            success: true,
+            output: displayOutput,
+            raw_output: executeResult.raw_output,
+            message: 'Command berhasil dijalankan',
+            command: processedCommand
+          };
+        } else {
+          addLog(`❌ Command failed: ${executeResult.error}`, 'error');
           return {
             success: false,
-            output: `Error: ${fetchError.message}`,
-            message: 'Gagal menghubungi backend'
+            output: executeResult.error,
+            message: 'Command gagal dijalankan'
           };
         }
 
@@ -304,7 +382,7 @@ export default function Home() {
     }
 
     setIsRunning(true);
-    setVirtualFileSystem({}); // Reset file system
+    setVirtualFileSystem({});
     addLog('🚀 Agent mulai bekerja...', 'info');
     
     try {
@@ -343,7 +421,6 @@ Anda memiliki tools untuk:
         addLog('Mode: Autonomous', 'info');
       }
 
-      // ✅ TOOLS LENGKAP UNTUK EKSEKUSI
       const tools = [
         {
           type: 'function',
@@ -458,9 +535,8 @@ Anda memiliki tools untuk:
 
       let currentFileSystem = {};
       let iterationCount = 0;
-      const MAX_ITERATIONS = 10; // Batasi loop untuk safety
+      const MAX_ITERATIONS = 10;
 
-      // ✅ AGENT LOOP - terus jalankan sampai selesai
       while (iterationCount < MAX_ITERATIONS) {
         iterationCount++;
         addLog(`🔄 Iterasi ${iterationCount}...`, 'info');
@@ -468,22 +544,17 @@ Anda memiliki tools untuk:
         const response = await callBackendAPI(messages, tools);
         const assistantMessage = response.choices[0].message;
 
-        // Tampilkan pemikiran agent
         if (assistantMessage.content) {
           addThought(assistantMessage.content, `Step ${iterationCount}`);
         }
 
-        // Cek apakah ada tool calls
         if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
-          // Tidak ada tool calls = agent sudah selesai
           addLog('✅ Agent selesai (no more actions)', 'success');
           break;
         }
 
-        // Tambahkan assistant message ke conversation
         messages.push(assistantMessage);
 
-        // Eksekusi semua tool calls
         let allToolResults = [];
         for (const toolCall of assistantMessage.tool_calls) {
           const functionName = toolCall.function.name;
@@ -491,16 +562,13 @@ Anda memiliki tools untuk:
 
           addLog(`🔧 Tool: ${functionName}`, 'info');
 
-          // Eksekusi tool (AWAIT karena sekarang async)
           const toolResult = await executeToolCall(functionName, functionArgs, currentFileSystem);
           
-          // Update file system jika ada
           if (toolResult.filesystem) {
             currentFileSystem = toolResult.filesystem;
             setVirtualFileSystem(toolResult.filesystem);
           }
 
-          // Tambahkan tool result ke conversation
           messages.push({
             role: 'tool',
             tool_call_id: toolCall.id,
@@ -509,16 +577,14 @@ Anda memiliki tools untuk:
 
           allToolResults.push(toolResult);
 
-          // Jika tool adalah complete_task, stop loop
           if (functionName === 'complete_task') {
             addLog('🎉 Task ditandai selesai oleh agent!', 'success');
             addThought(`Task Summary: ${toolResult.summary}`, 'COMPLETED');
-            iterationCount = MAX_ITERATIONS; // Force exit loop
+            iterationCount = MAX_ITERATIONS;
             break;
           }
         }
 
-        // Delay sebelum iterasi berikutnya
         await sleep(1500);
       }
 
@@ -526,7 +592,6 @@ Anda memiliki tools untuk:
         addLog('⚠️ Reached max iterations', 'warning');
       }
 
-      // Tampilkan file system hasil eksekusi
       const fileCount = Object.keys(currentFileSystem).length;
       if (fileCount > 0) {
         addLog(`📦 Total ${fileCount} file/direktori dibuat`, 'success');
@@ -594,7 +659,9 @@ Anda memiliki tools untuk:
                 <div className="text-4xl">🤖</div>
                 <div>
                   <h1 className="text-2xl font-bold text-white">Groq Agent Executor</h1>
-                  <p className="text-purple-200 text-sm">Llama 3.3 70B • Action-Ready</p>
+                  <p className="text-purple-200 text-sm">
+                    Llama 3.3 70B • Mode: {executionMode === 'backend' ? '🔧 Backend' : '📡 Direct'}
+                  </p>
                 </div>
               </div>
               <button onClick={resetApiKey} className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-lg">
@@ -685,7 +752,7 @@ Anda memiliki tools untuk:
                         <div className="text-gray-300 text-xs font-mono mb-2 bg-black/30 p-2 rounded overflow-x-auto">
                           $ {item.command}
                         </div>
-                        <div className="text-green-400 text-xs font-mono bg-black/30 p-2 rounded overflow-x-auto">
+                        <div className="text-green-400 text-xs font-mono bg-black/30 p-2 rounded overflow-x-auto whitespace-pre-wrap">
                           {item.output}
                         </div>
                       </div>
