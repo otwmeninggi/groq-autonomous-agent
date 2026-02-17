@@ -7,14 +7,25 @@ import os
 
 app = Flask(__name__)
 
-# Enable CORS for all routes
+# Enable CORS for all routes - PERMISSIVE CONFIG
 CORS(app, resources={
-    r"/api/*": {
+    r"/*": {
         "origins": "*",
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "X-API-Key", "X-Gemini-Key", "X-OpenRouter-Key", "X-Together-Key"]
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["*"],
+        "expose_headers": ["*"],
+        "supports_credentials": False,
+        "max_age": 3600
     }
 })
+
+# Add CORS headers to every response
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', '*')
+    response.headers.add('Access-Control-Allow-Methods', '*')
+    return response
 
 # ====== PROVIDER CONFIGURATIONS ======
 PROVIDERS = {
@@ -138,7 +149,11 @@ def convert_gemini_response(gemini_response):
 def multi_provider_chat():
     """Multi-provider chat endpoint with auto-fallback"""
     if request.method == 'OPTIONS':
-        return '', 204
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', '*')
+        response.headers.add('Access-Control-Allow-Methods', '*')
+        return response, 200
     
     try:
         data = request.get_json()
@@ -242,7 +257,11 @@ def multi_provider_chat():
 def groq_chat_legacy():
     """Legacy endpoint for backward compatibility"""
     if request.method == 'OPTIONS':
-        return '', 204
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', '*')
+        response.headers.add('Access-Control-Allow-Methods', '*')
+        return response, 200
     
     try:
         data = request.get_json()
@@ -275,7 +294,11 @@ def groq_chat_legacy():
 def execute_command():
     """Execute shell command (curl, wget, etc)"""
     if request.method == 'OPTIONS':
-        return '', 204
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', '*')
+        response.headers.add('Access-Control-Allow-Methods', '*')
+        return response, 200
     
     try:
         data = request.get_json()
