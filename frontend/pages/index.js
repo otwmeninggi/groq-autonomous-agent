@@ -207,30 +207,65 @@ export default function Home() {
     if (apiKeys.openrouter) headers['X-OpenRouter-Key'] = apiKeys.openrouter;
     if (apiKeys.together) headers['X-Together-Key'] = apiKeys.together;
 
-    const response = await fetch(backendUrl + '/api/chat', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        messages,
-        tools,
-        temperature: 0.5,
-        max_tokens: 1500,
-        provider_order: activeProviders
-      })
-    });
+    // Try multi-provider endpoint first
+    try {
+      const response = await fetch(backendUrl + '/api/chat', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          messages,
+          tools,
+          temperature: 0.5,
+          max_tokens: 1500,
+          provider_order: activeProviders
+        })
+      });
 
-    if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.error || 'API Error');
+      if (!response.ok) {
+        throw new Error(`Multi-provider failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      if (result.provider) {
+        setCurrentProvider(result.provider);
+        addLog(`🔄 Using: ${result.provider}`, 'info');
+      }
+
+      return result;
+    } catch (multiError) {
+      // Fallback to legacy Groq endpoint if multi-provider fails
+      addLog(`⚠️ Multi-provider failed, using legacy Groq...`, 'warning');
+      
+      if (!apiKeys.groq) {
+        throw new Error('No Groq API key available for fallback');
+      }
+
+      const legacyResponse = await fetch(backendUrl + '/api/groq/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKeys.groq
+        },
+        body: JSON.stringify({
+          model: 'llama-3.3-70b-versatile',
+          messages,
+          tools,
+          temperature: 0.5,
+          max_tokens: 1500
+        })
+      });
+
+      if (!legacyResponse.ok) {
+        const err = await legacyResponse.json();
+        throw new Error(err.error || 'Legacy API failed');
+      }
+
+      const result = await legacyResponse.json();
+      setCurrentProvider('groq (legacy)');
+      addLog(`🔄 Using: groq (legacy)`, 'info');
+      
+      return result;
     }
-
-    const result = await response.json();
-    if (result.provider) {
-      setCurrentProvider(result.provider);
-      addLog(`🔄 Using: ${result.provider}`, 'info');
-    }
-
-    return result;
   };
 
   const executeAgentTask = async () => {
